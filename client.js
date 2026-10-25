@@ -54,7 +54,7 @@ window.__ModuleLoader__.load({
       overview: 'Effective route',
       effectiveOfficial: 'Session provider and model (official behaviour)',
       effortNote:
-        'An unsupported level is dropped when the review runs; the target model default is used instead.',
+        'Lower reasoning levels are usually faster; higher levels usually take more reasoning time. Unsupported levels fall back to the target model default.',
       noneOption: '— none —',
       readFailed: 'Could not read this row\'s settings',
     };
@@ -88,7 +88,7 @@ window.__ModuleLoader__.load({
       clear: '改用会话模型',
       overview: '当前生效路由',
       effectiveOfficial: '会话渠道与模型（官方行为）',
-      effortNote: '目标模型不支持的档位会在审查时被忽略，改用该模型的默认档位。',
+      effortNote: '推理档位越低通常响应越快，越高通常需要更多推理时间；具体效果取决于目标模型。不支持的档位会改用目标模型默认值。',
       noneOption: '— 不选 —',
       readFailed: '无法读取此行的设置',
     };

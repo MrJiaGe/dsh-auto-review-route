@@ -70,7 +70,8 @@ return readDecision(ctx.llm.stream(options))
 
 - **不预置默认渠道/模型。** 没选 → 插件完全惰性 → 走官方行为（会话模型）。
 - **不改策略、提示词、工具、生命周期。** `system`、`messages`、`temperature`、`signal` 逐字节原样转发；不注入、不删除、不重排任何内容。
-- **不新增会话事件、不写磁盘、不改官方包。**
+- **不新增会话事件、不写磁盘、不改官方包。** 插件自身不写独立配置文件；UI 保存的配置由 DSH 的 profile 配置系统管理。
+- **卸载说明。** 通过 DSH 插件管理器卸载后，插件包和插件行会被移除，但 profile 配置文件中由用户保存的该插件配置可能保留。通常这不会影响 DSH；若要彻底清理，请在卸载后打开当前 profile 的 `cordis.patch.yml`，删除 `auto-review-route` 对应的配置项，再重启 DSH。
 - **配错不会挡工作。** 渠道不存在、模型不可用、档位不支持 → 打一条日志后**回落到官方路由**，审查照常进行。
 
 ## 配置项
@@ -92,7 +93,7 @@ return readDecision(ctx.llm.stream(options))
 
 - **渠道**下拉：来自 `ctx.llm.listProviders()`（`wdtn` / `workbuddy` / `deepseek-account` …）
 - **模型**下拉：切换渠道后自动从 `ctx.llm.listModels(provider)` 拉取；拉不到时可切"手动输入 ID"
-- **推理档位**下拉：`off / minimal / low / medium / high / xhigh / max`，默认"跟随目标模型"
+- **推理档位**下拉：`off / minimal / low / medium / high / xhigh / max`，默认"跟随目标模型"。通常推理档位越低响应越快，越高需要更多推理时间；具体效果取决于目标模型。
 - **审查提示词标识**：一般不用动
 - **保存 / 重置 / 改用会话模型**：保存即写回 profile patch，**即时生效**（字段都是 `.volatile()`，无需重启）
 

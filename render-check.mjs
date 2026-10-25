@@ -292,6 +292,17 @@ console.log("\n7. The primary control does not rely on an undeclared theme token
     !/color:\s*var\(--dsw-alias-label-primary\)/.test(primaryColor),
     primaryColor.replace(/\s+/g, " ").slice(0, 120),
   );
+  const hoverBlock = css.slice(css.indexOf(".aar button.aar-primary:hover:not(:disabled)"));
+  check(
+    "the enabled primary hover keeps the brand fill",
+    /background:\s*var\(--dsw-alias-brand-primary/.test(hoverBlock.slice(0, hoverBlock.indexOf("}"))),
+    hoverBlock.replace(/\s+/g, " ").slice(0, 160),
+  );
+  check(
+    "the enabled primary hover keeps the white label",
+    /color:\s*#fff/.test(hoverBlock.slice(0, hoverBlock.indexOf("}"))),
+    hoverBlock.replace(/\s+/g, " ").slice(0, 160),
+  );
 }
 
 console.log(failures === 0 ? "\nAll checks passed.\n" : `\n${failures} check(s) failed.\n`);

@@ -123,7 +123,8 @@ window.__ModuleLoader__.load({
   color:#fff;
   border-color:transparent;
 }
-.aar :disabled { opacity:.6; cursor:not-allowed; }
+.aar button.aar-primary:hover:not(:disabled) { background:var(--dsw-alias-brand-primary,#356be8); color:#fff; }
+ .aar :disabled { opacity:.6; cursor:not-allowed; }
 /* Keep the label legible even at the reduced disabled opacity: a disabled
    filled control still shows its text instead of a blank surface. */
 .aar button.aar-primary:disabled { color:#fff; opacity:.55; }

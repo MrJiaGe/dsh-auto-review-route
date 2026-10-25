@@ -12,14 +12,14 @@
  * `ctx.settings`, so a save behaves exactly like any other profile edit.
  */
 window.__ModuleLoader__.load({
-  id: '@local/dsh-auto-review-route',
+  id: '@mrjiage/dsh-auto-review-route',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
     const { useEffect, useState, useCallback, useMemo } = React;
 
     const NS = 'dshAutoReviewRoute';
-    const ROW_KEY = '@local/dsh-auto-review-route#auto-review-route';
+    const ROW_KEY = '@mrjiage/dsh-auto-review-route#auto-review-route';
     const BRIDGE = '/api/dsh-auto-review-route';
 
     const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];

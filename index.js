@@ -27,7 +27,7 @@
  * - A unusable configured route fails open to the official route instead of
  *   failing the review, so a typo can never block tool calls.
  *
- * @module @local/dsh-auto-review-route
+ * @module @mrjiage/dsh-auto-review-route
  */
 import z from "@deepseek-ai/schemastery";
 

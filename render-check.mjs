@@ -182,12 +182,12 @@ const module = load();
 
 console.log("\n1. The bundle registers its own row page");
 check("registered a module", registered !== undefined);
-check("module id is the package name", registered.id === "@local/dsh-auto-review-route", registered.id);
+check("module id is the package name", registered.id === "@mrjiage/dsh-auto-review-route", registered.id);
 check("it injects the slots service", (module.inject ?? []).includes("slots"));
 check("it registered the plugins.row.config slot", slotInjections.includes("plugins.row.config"));
 check(
   "the row key matches this bundle's patch row",
-  slotRegistrations[0]?.options?.key === "@local/dsh-auto-review-route#auto-review-route",
+  slotRegistrations[0]?.options?.key === "@mrjiage/dsh-auto-review-route#auto-review-route",
   String(slotRegistrations[0]?.options?.key),
 );
 

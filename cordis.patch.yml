@@ -4,5 +4,5 @@
 # inert until the user picks a provider and a model in the Plugins page.
 - insert:
     - id: auto-review-route
-      name: '@local/dsh-auto-review-route'
+      name: '@mrjiage/dsh-auto-review-route'
       config: {}

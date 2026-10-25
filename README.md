@@ -1,4 +1,4 @@
-# @local/dsh-auto-review-route
+# @mrjiage/dsh-auto-review-route
 
 让 DeepSeek Harness 的**自动审查（Auto review）**把审查请求发往你指定的渠道与模型，避免审查请求和工作模型抢同一个并发额度。
 

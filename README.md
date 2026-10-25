@@ -2,6 +2,26 @@
 
 让 DeepSeek Harness 的**自动审查（Auto review）**把审查请求发往你指定的渠道与模型，避免审查请求和工作模型抢同一个并发额度。
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+> 本项目是社区维护的第三方插件，不是 DeepSeek Harness 官方组件，也不代表 DeepSeek 或其关联方。
+
+## 开源许可
+
+本项目采用 **MIT License**。你可以自由使用、复制、修改、合并、发布、分发、再许可和销售本项目的副本，但必须在副本或其重要部分中保留版权声明和许可证声明。完整条款见 [LICENSE](LICENSE)。
+
+Copyright (c) 2026 DrJia
+
+### 第三方依赖
+
+本项目依赖 DeepSeek Harness 相关软件包及其他 npm 软件包。它们不属于本项目的 MIT 授权范围，分别受其各自的许可证和条款约束。分发本项目时，请同时遵守相关依赖包的许可证要求。
+
+本项目不会修改官方自动审查插件，但运行时依赖 DeepSeek Harness 提供的插件接口。DeepSeek Harness、Auto review 及相关名称和标识的权利归其各自权利人所有。
+
+### 免责声明
+
+本项目按“现状”提供，不对可用性、准确性、兼容性或特定用途适用性作任何明示或默示保证。使用本插件切换 provider/model 可能受到服务商配额、计费、上下文窗口、网络状况和模型能力差异的影响。使用者应自行确认目标服务商的授权、隐私、数据处理和计费条款，并对自己的配置和请求承担责任。
+
 官方插件 `@deepseek-ai/dsh-experimental-auto-review` **一个字符都不改**。
 
 ---

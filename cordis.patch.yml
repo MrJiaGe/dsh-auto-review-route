@@ -1,0 +1,8 @@
+# Inserts one Host row. The row only reroutes auto-review's model request; the
+# official @deepseek-ai/dsh-experimental-auto-review row is never modified.
+# `config` is intentionally empty: nothing is preselected, so the plugin stays
+# inert until the user picks a provider and a model in the Plugins page.
+- insert:
+    - id: auto-review-route
+      name: '@local/dsh-auto-review-route'
+      config: {}

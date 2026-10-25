@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Auto-review model route">
+  <defs>
+    <linearGradient id="arroute-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#arroute-bg)"/>
+  <!-- Shield: the review gate that stays untouched. -->
+  <path d="M20 15h13l-2 5c-1.6 4.2-1 8.6 1.6 12.2l2 2.8-9.6 9.6a3 3 0 0 1-4.2 0L14 38.4a3 3 0 0 1 0-4.2l6-6z"
+        fill="#ffffff" opacity="0.22"/>
+  <!-- Two diverging lanes: the request leaves the session route for another one. -->
+  <path d="M16 44c8 0 10-10 16-10h14" fill="none" stroke="#ffffff" stroke-width="3.2"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+  <path d="M16 44c8 0 10-10 16-10" fill="none" stroke="#ffffff" stroke-width="3.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M40 26l8 8-8 8" fill="none" stroke="#ffffff" stroke-width="3.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Check mark: the decision still comes from the official reviewer. -->
+  <path d="M23 21l3.4 3.4L34 17" fill="none" stroke="#ffffff" stroke-width="2.6"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+</svg>

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Auto-review model route",
+    "description": "Send the Auto-review model request to a provider and model you choose, so the reviewer stops sharing the working model's concurrency quota. The official auto-review plugin is never modified."
+  }
+}

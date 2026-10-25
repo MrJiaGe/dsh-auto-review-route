@@ -1,0 +1,9 @@
+# Installed dependencies. This workspace is linked into a DSH profile, so pnpm
+# materializes the store here; neither directory belongs in version control.
+node_modules/
+.pnpm-store/
+
+# Logs and editor/OS scratch files.
+*.log
+.DS_Store
+Thumbs.db

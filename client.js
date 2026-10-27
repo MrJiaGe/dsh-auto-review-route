@@ -29,7 +29,7 @@ window.__ModuleLoader__.load({
       summaryUnset: 'Reviewer uses the session model',
       summaryPrefix: 'Reviewer pinned to',
       intro:
-        'Send the Auto-review model request to a provider and model of your choice, so the reviewer does not compete with the working model for the same concurrency quota. The official auto-review plugin is not modified: its risk policy, prompt, tools and lifecycle stay exactly as shipped.',
+        'Send the Auto-review model request to a provider and model of your choice, so the reviewer does not compete with the working model for the same concurrency quota. The official auto-review plugin is not modified: its risk policy, prompt, tools and lifecycle stay exactly as shipped. With unofficial direct API providers, severe upstream prompt injection, prompt rewriting or other interference may affect review results or cause requests to fail; this upstream behaviour is outside this plugin\'s control.',
       unsetNotice:
         'Nothing is selected yet, so the official behaviour applies: the reviewer uses the session\'s own provider and model. Pick both a provider and a model to pin it.',
       provider: 'Provider',
@@ -64,7 +64,7 @@ window.__ModuleLoader__.load({
       summaryUnset: '审查使用会话模型',
       summaryPrefix: '审查已指定为',
       intro:
-        '把自动审查的模型请求发往你指定的渠道与模型，避免审查请求和工作模型抢同一个并发额度。官方自动审查插件不会被修改：风险策略、提示词、工具与生命周期全部保持出厂状态。',
+        '把自动审查的模型请求发往你指定的渠道与模型，避免审查请求和工作模型抢同一个并发额度。官方自动审查插件不会被修改：风险策略、提示词、工具与生命周期全部保持出厂状态。使用非官方直连 API 时，若上游对请求进行严重的提示词注入、改写或其他干扰，可能影响审查结果甚至导致调用失败；此类上游行为不受本插件控制。',
       unsetNotice:
         '当前未选择任何渠道与模型，因此沿用官方行为：审查使用会话自身的渠道与模型。选择渠道和模型后才会接管。',
       provider: '渠道',

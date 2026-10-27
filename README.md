@@ -1,6 +1,6 @@
 # @mrjiage/dsh-auto-review-route
 
-让 DeepSeek Harness 的**自动审查（Auto review）**把审查请求发往你指定的渠道与模型，避免审查请求和工作模型抢同一个并发额度。
+让 DeepSeek Harness 的**自动审查（Auto review）**把审查请求发往你指定的渠道与模型，避免审查请求和工作模型抢同一个并发额度。使用非官方直连 API 时，若上游对请求进行严重的提示词注入、改写或其他干扰，可能影响审查结果甚至导致调用失败；此类上游行为不受本插件控制。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 

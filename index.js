@@ -14,16 +14,15 @@
  *   return readDecision(ctx.llm.stream(options))
  *
  * That call goes through the public `llm/stream` waterfall, whose documented
- * purpose includes "routing". This plugin rewrites the provider/model of that
- * one call and re-dispatches it. It never edits, forks, or wraps the official
- * package: the official row is untouched, and every other option of the review
- * request (system prompt `REVIEW_POLICY`, messages, temperature, absence of
- * tools, signal) is forwarded byte-for-byte.
+ * purpose includes "routing". This plugin can reroute that one call. By default
+ * every request option is forwarded unchanged; when the user explicitly picks a
+ * reason language, it appends a narrow instruction affecting only the optional
+ * denial-reason wording. The official package and its risk protocol are untouched.
  *
  * Deliberate non-goals:
- * - No provider/model default. An unset route means this plugin does nothing
- *   and the official behaviour (session route) applies.
- * - No policy, prompt, tool, retry, or lifecycle changes.
+ * - No provider/model default. An unset route keeps the session's route; the
+ *   optional reason-language instruction can be selected independently.
+ * - No risk-policy, decision-schema, tool, retry, or lifecycle changes.
  * - A unusable configured route fails open to the official route instead of
  *   failing the review, so a typo can never block tool calls.
  *
@@ -56,10 +55,14 @@ export const inject = ["llm", "settings", "configEditor"];
  */
 const DEFAULT_MARKER = "REVIEW_POLICY";
 
+const REASON_LANGUAGE_INSTRUCTIONS = Object.freeze({
+  zh: "When a deny response includes the optional reason field, write its value in Simplified Chinese. This affects wording only: do not change risk classification, decision, JSON keys, allowed object shapes, or any other policy. Return exactly one JSON object and no other text.",
+  en: "When a deny response includes the optional reason field, write its value in English. This affects wording only: do not change risk classification, decision, JSON keys, allowed object shapes, or any other policy. Return exactly one JSON object and no other text.",
+});
+
 /**
- * Live-editable route policy. Both route fields default to an empty string,
- * meaning "not chosen": with no choice this plugin stays inert and the official
- * reviewer keeps using the session's own provider and model.
+ * Live-editable reviewer controls. Empty route fields keep the session route;
+ * an empty reason language leaves the shipped review prompt unchanged.
  */
 export const Config = z.object({
   provider: z
@@ -79,6 +82,11 @@ export const Config = z.object({
       "Optional reasoning effort for the reviewer call. Empty inherits the target model's default. "
         + "Dropped automatically when the target model does not declare it.",
     )
+    .volatile(),
+  reasonLanguage: z
+    .string()
+    .default("")
+    .description("Optional language for denial reasons. Empty keeps the official prompt unchanged.")
     .volatile(),
   marker: z
     .string()
@@ -246,28 +254,33 @@ export function apply(ctx, config) {
         }
 
         const route = target(config);
-        if (route === undefined) {
-          // No user choice: the official reviewer keeps its own route.
-          yield* next();
-          return;
+        let forwarded = options;
+
+        if (route !== undefined && (options.provider !== route.provider || options.model !== route.model)) {
+          const effort = await preflight(route, options.signal);
+          if (effort !== null) {
+            forwarded = {
+              ...forwarded,
+              provider: route.provider,
+              model: route.model,
+              ...effort === undefined ? {} : { reasoningEffort: effort },
+            };
+          }
         }
-        if (options.provider === route.provider && options.model === route.model) {
+
+        const reasonLanguage = read(config, "reasonLanguage");
+        if (Object.hasOwn(REASON_LANGUAGE_INSTRUCTIONS, reasonLanguage)) {
+          forwarded = {
+            ...forwarded,
+            system: `${forwarded.system}\n\n${REASON_LANGUAGE_INSTRUCTIONS[reasonLanguage]}`,
+          };
+        }
+
+        if (forwarded === options) {
           yield* next();
           return;
         }
 
-        const effort = await preflight(route, options.signal);
-        if (effort === null) {
-          yield* next();
-          return;
-        }
-
-        const forwarded = {
-          ...options,
-          provider: route.provider,
-          model: route.model,
-          ...effort === undefined ? {} : { reasoningEffort: effort },
-        };
         rewritten.add(forwarded);
         try {
           yield* ctx.llm.stream(forwarded);
@@ -430,10 +443,10 @@ function mountRoutes(ctx) {
               writeJson(response, 200, { ok: false, code: "values-required", message: "values object is required" });
               return;
             }
-            // Only the four owned keys are writable; a stray field must not be
+            // Only the five owned keys are writable; a stray field must not be
             // persisted into the profile patch.
             const ops = [];
-            for (const key of ["provider", "model", "reasoningEffort", "marker"]) {
+            for (const key of ["provider", "model", "reasoningEffort", "reasonLanguage", "marker"]) {
               if (!Object.hasOwn(values, key)) continue;
               const raw = values[key];
               if (typeof raw !== "string") {

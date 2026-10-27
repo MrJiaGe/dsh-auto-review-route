@@ -29,9 +29,9 @@ window.__ModuleLoader__.load({
       summaryUnset: 'Reviewer uses the session model',
       summaryPrefix: 'Reviewer pinned to',
       intro:
-        'Send the Auto-review model request to a provider and model of your choice, so the reviewer does not compete with the working model for the same concurrency quota. The official auto-review plugin is not modified: its risk policy, prompt, tools and lifecycle stay exactly as shipped. With unofficial direct API providers, severe upstream prompt injection, prompt rewriting or other interference may affect review results or cause requests to fail; this upstream behaviour is outside this plugin\'s control.',
+        'Send the Auto-review model request to a provider and model of your choice, so the reviewer does not compete with the working model for the same concurrency quota. The official auto-review plugin is not modified: its fixed risk policy, tools and lifecycle stay intact. Only when you select a reason language does this plugin append a narrow instruction for the optional reason text. With unofficial direct API providers, severe upstream prompt injection, prompt rewriting or other interference may affect review results or cause requests to fail; this upstream behaviour is outside this plugin\'s control.',
       unsetNotice:
-        'Nothing is selected yet, so the official behaviour applies: the reviewer uses the session\'s own provider and model. Pick both a provider and a model to pin it.',
+        'Nothing is selected yet, so the reviewer keeps the session route. Pick both a provider and a model to pin it; a reason language can be selected independently.',
       provider: 'Provider',
       model: 'Model',
       effort: 'Reasoning effort',
@@ -52,9 +52,15 @@ window.__ModuleLoader__.load({
       retry: 'Retry',
       clear: 'Use the session model',
       overview: 'Effective route',
-      effectiveOfficial: 'Session provider and model (official behaviour)',
+      effectiveOfficial: 'Session provider and model (official route)',
       effortNote:
         'Lower reasoning levels are usually faster; higher levels usually take more reasoning time. Unsupported levels fall back to the target model default.',
+      reasonLanguage: 'Review reason language',
+      reasonLanguageOfficial: 'Keep the official prompt',
+      reasonLanguageZh: '简体中文 Simplified Chinese',
+      reasonLanguageEn: 'English',
+      reasonLanguageNote:
+        'Keep this blank to leave the official review prompt unchanged. A selected language only guides the optional denial reason; it does not change the risk decision or JSON format, and the model/provider may not follow it.',
       noneOption: '— none —',
       readFailed: 'Could not read this row\'s settings',
     };
@@ -64,9 +70,9 @@ window.__ModuleLoader__.load({
       summaryUnset: '审查使用会话模型',
       summaryPrefix: '审查已指定为',
       intro:
-        '把自动审查的模型请求发往你指定的渠道与模型，避免审查请求和工作模型抢同一个并发额度。官方自动审查插件不会被修改：风险策略、提示词、工具与生命周期全部保持出厂状态。使用非官方直连 API 时，若上游对请求进行严重的提示词注入、改写或其他干扰，可能影响审查结果甚至导致调用失败；此类上游行为不受本插件控制。',
+        '把自动审查的模型请求发往你指定的渠道与模型，避免审查请求和工作模型抢同一个并发额度。官方自动审查插件代码、固定风险策略、工具与生命周期保持不变；仅在你选择理由语言时，本插件才会追加一条只针对可选理由文字语言的指令。使用非官方直连 API 时，若上游对请求进行严重的提示词注入、改写或其他干扰，可能影响审查结果甚至导致调用失败；此类上游行为不受本插件控制。',
       unsetNotice:
-        '当前未选择任何渠道与模型，因此沿用官方行为：审查使用会话自身的渠道与模型。选择渠道和模型后才会接管。',
+        '当前未选择渠道与模型，因此审查仍使用会话路由。选择理由语言可以单独生效；选择渠道和模型后才会接管模型路由。',
       provider: '渠道',
       model: '模型',
       effort: '推理档位',
@@ -87,8 +93,13 @@ window.__ModuleLoader__.load({
       retry: '重试',
       clear: '改用会话模型',
       overview: '当前生效路由',
-      effectiveOfficial: '会话渠道与模型（官方行为）',
+      effectiveOfficial: '会话渠道与模型（官方路由）',
       effortNote: '推理档位越低通常响应越快，越高通常需要更多推理时间；具体效果取决于目标模型。不支持的档位会改用目标模型默认值。',
+      reasonLanguage: '审查理由语言',
+      reasonLanguageOfficial: '保持官方提示词',
+      reasonLanguageZh: '简体中文 Simplified Chinese',
+      reasonLanguageEn: 'English',
+      reasonLanguageNote: '保持官方提示词时不追加语言指令。选择语言仅指导可选拒绝理由的文字语言，不改变风险判断或 JSON 格式；模型或渠道可能不遵从。',
       noneOption: '— 不选 —',
       readFailed: '无法读取此行的设置',
     };
@@ -160,6 +171,7 @@ window.__ModuleLoader__.load({
         provider: text('provider'),
         model: text('model'),
         reasoningEffort: text('reasoningEffort'),
+        reasonLanguage: text('reasonLanguage'),
         // An empty marker means "use the shipped default"; show it plainly so
         // the field never looks like a missing requirement.
         marker: text('marker') || 'REVIEW_POLICY',
@@ -465,6 +477,25 @@ window.__ModuleLoader__.load({
             ),
             h('span', { key: 'n', className: 'aar-note' }, t('effortNote')),
           ]),
+          h('div', { key: 'reason-language', className: 'aar-field' }, [
+            h('label', { key: 'l', htmlFor: 'aar-reason-language' }, t('reasonLanguage')),
+            h(
+              'select',
+              {
+                key: 's',
+                id: 'aar-reason-language',
+                value: draft.reasonLanguage,
+                disabled: busy,
+                onChange: (event) => edit({ reasonLanguage: event.target.value }),
+              },
+              [
+                h('option', { key: '', value: '' }, t('reasonLanguageOfficial')),
+                h('option', { key: 'zh', value: 'zh' }, t('reasonLanguageZh')),
+                h('option', { key: 'en', value: 'en' }, t('reasonLanguageEn')),
+              ],
+            ),
+            h('span', { key: 'n', className: 'aar-note' }, t('reasonLanguageNote')),
+          ]),
         ]),
         h('hr', { key: 'hr2' }),
         h('div', { key: 'marker', className: 'aar-field' }, [
@@ -500,7 +531,13 @@ window.__ModuleLoader__.load({
               type: 'button',
               disabled: busy,
               onClick: () => {
-                const cleared = { provider: '', model: '', reasoningEffort: '', marker: draft.marker };
+                const cleared = {
+                  provider: '',
+                  model: '',
+                  reasoningEffort: '',
+                  reasonLanguage: draft.reasonLanguage,
+                  marker: draft.marker,
+                };
                 edit({ provider: '', model: '', reasoningEffort: '' });
                 void save(cleared);
               },

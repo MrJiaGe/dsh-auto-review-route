@@ -1,6 +1,6 @@
 # @mrjiage/dsh-auto-review-route
 
-让 DeepSeek Harness 的**自动审查（Auto review）**把审查请求发往你指定的渠道与模型，避免审查请求和工作模型抢同一个并发额度。使用非官方直连 API 时，若上游对请求进行严重的提示词注入、改写或其他干扰，可能影响审查结果甚至导致调用失败；此类上游行为不受本插件控制。
+让 DeepSeek Harness 的**自动审查（Auto review）**把审查请求发往你指定的渠道与模型，避免审查请求和工作模型抢同一个并发额度。使用非官方直连 API 时，若上游对请求进行严重的提示词注入、改写或其他干扰，可能影响审查结果甚至导致调用失败；此类上游行为不受本插件控制。可选的审查理由语言设置默认关闭；选中后只要求模型改变理由文字语言，不修改官方风险策略或 JSON 协议。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -55,7 +55,7 @@ return readDecision(ctx.llm.stream(options))
 "Waterfall around every streaming model call (retry, replay, routing)."
 ```
 
-本插件只在这一层做一件事：认出"这是审查请求"，把 `provider` / `model` 换掉，再重新派发。其余一切都按原样透传。
+本插件只在这一层识别审查请求：可选地替换 `provider` / `model`，并在用户明确选择理由语言时于官方提示词末尾追加一条有限指令。默认不追加任何提示词；官方包、风险决策、消息、工具、温度和生命周期保持不变。
 
 识别条件（全部都是官方审查调用的独有特征，且同时排除其他调用）：
 
@@ -68,8 +68,8 @@ return readDecision(ctx.llm.stream(options))
 
 ## 明确不做的事
 
-- **不预置默认渠道/模型。** 没选 → 插件完全惰性 → 走官方行为（会话模型）。
-- **不改策略、提示词、工具、生命周期。** `system`、`messages`、`temperature`、`signal` 逐字节原样转发；不注入、不删除、不重排任何内容。
+- **不预置默认渠道/模型。** provider/model 留空时不改路由、沿用会话模型；reasonLanguage 留空时才对审查请求完全惰性。
+- **默认不改官方提示词。** 只有显式选择理由语言时，才在原 `system` 末尾追加固定语言指令；它只约束可选 `reason` 文本，不改风险分类、决策或 JSON 协议。`messages`、`temperature`、`signal`、工具和生命周期始终原样保留。
 - **不新增会话事件、不写磁盘、不改官方包。** 插件自身不写独立配置文件；UI 保存的配置由 DSH 的 profile 配置系统管理。
 - **卸载说明。** 通过 DSH 插件管理器卸载后，插件包和插件行会被移除，但 profile 配置文件中由用户保存的该插件配置可能保留。通常这不会影响 DSH；若要彻底清理，请在卸载后打开当前 profile 的 `cordis.patch.yml`，删除 `auto-review-route` 对应的配置项，再重启 DSH。
 - **配错不会挡工作。** 渠道不存在、模型不可用、档位不支持 → 打一条日志后**回落到官方路由**，审查照常进行。
@@ -83,9 +83,10 @@ return readDecision(ctx.llm.stream(options))
 | `provider` | `""` | 审查用哪个渠道。空 = 不接管 |
 | `model` | `""` | 该渠道上的模型 ID。空 = 不接管 |
 | `reasoningEffort` | `""` | 可选档位；空 = 用目标模型默认。不支持的档位会被自动丢弃 |
+| `reasonLanguage` | `""` | 审查理由语言；空 = 不追加提示词，`zh` = 简体中文，`en` = English。独立于 provider/model 路由 |
 | `marker` | `"REVIEW_POLICY"` | 审查提示词前缀。**只在官方改了这个标识时才需要动** |
 
-两个必填项都填了才生效；只填一个等于没填。
+provider 和 model 都填写后才会接管模型路由；reasonLanguage 可单独选择。理由语言留空时不修改官方提示词。
 
 ## UI
 
@@ -94,22 +95,24 @@ return readDecision(ctx.llm.stream(options))
 - **渠道**下拉：来自 `ctx.llm.listProviders()`（`wdtn` / `workbuddy` / `deepseek-account` …）
 - **模型**下拉：切换渠道后自动从 `ctx.llm.listModels(provider)` 拉取；拉不到时可切"手动输入 ID"
 - **推理档位**下拉：`off / minimal / low / medium / high / xhigh / max`，默认"跟随目标模型"。通常推理档位越低响应越快，越高需要更多推理时间；具体效果取决于目标模型。
+- **审查理由语言**下拉（位于推理档位下方）：默认"保持官方提示词"；支持 `简体中文 Simplified Chinese` 和 `English`。语言指令可独立于模型路由使用，只影响可选拒绝理由，模型或上游可能不遵从。
 - **审查提示词标识**：一般不用动
 - **保存 / 重置 / 改用会话模型**：保存即写回 profile patch，**即时生效**（字段都是 `.volatile()`，无需重启）
 
-页面顶部有"当前生效路由"卡片：未选时显示"会话渠道与模型（官方行为）"，选了才显示具体路由。
+页面顶部的"当前生效路由"卡片只汇报模型路由：未指定时使用会话渠道与模型；理由语言选项可独立生效。
 
 ## 目录
 
 ```
 package.json         dsh.bundle.patch + dsh.client 声明
 cordis.patch.yml     插入一行，config 为空
-index.js             Host：llm/stream 改道 + 两个只读列表接口
+index.js             Host：llm/stream 改道 / 理由语言 + bridge 接口
 client.js            Client：plugins.row.config 配置页
 locale/en.json       插件标题与描述（英文）
 locale/zh.json       插件标题与描述（中文）
 icon.svg             图标
-verify.mjs           26 项行为断言
+verify.mjs           Host 行为回归测试
+render-check.mjs     Client 页面渲染回归测试
 ```
 
 ## 验证
@@ -126,11 +129,15 @@ node verify.mjs
 4. 声明过的档位会转发
 5. 渠道不存在 → 不改道 + 一条日志
 6. 目标路由与会话路由相同时不重复派发
-7. 两个路由字段默认都是空字符串
+7. provider/model 与 reasonLanguage 都默认空字符串
+8. 选择理由语言但不配置模型路由时，仍沿用会话模型并只追加语言指令
+9. 配置理由语言也不会触碰普通对话、compaction 或标题生成
+10. 自定义目标路由不可用时回落到会话模型，独立选择的理由语言仍可生效
 
 ## 已知边界
 
 - **识别依赖提示词前缀。** 官方若改掉 `REVIEW_POLICY` 首行，插件会静默失效（回落到官方行为，不会崩）。`marker` 可覆盖，但失效时**不会报错**——这是刻意的，宁可不生效也不能挡住审查。
-- **改道会让 `llm/stream` 再进一次。** 其他监听者（如 dsh-ops 的 read-dedup）会看到两次。该监听者对无 `sessionId` 的调用本来就是清空后直通，行为等价。
+- **理由语言只是提示，不是强制保证。** 目标模型或上游 API 可能忽略、覆盖该语言指令；如果模型因此返回无效 JSON，官方 Auto-review 仍会按失败关闭。
+- **改道或追加理由语言指令会让 `llm/stream` 再进一次。** 其他监听者（如 dsh-ops 的 read-dedup）会看到两次。该监听者对无 `sessionId` 的调用本来就是清空后直通，行为等价。
 - **不解决配额粒度问题。** 如果限流是按 API key 或账号算的，换渠道无效；只有按渠道/模型计限流时才有意义。
 - **审查请求可能较大**（带 `FILTERED_HISTORY`）。目标渠道的上下文窗口要够，否则会以 provider 错误失败。

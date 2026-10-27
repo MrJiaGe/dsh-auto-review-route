@@ -28,6 +28,7 @@ function liveConfig(values) {
     provider: "",
     model: "",
     reasoningEffort: "",
+    reasonLanguage: "",
     marker: "REVIEW_POLICY",
   };
   const merged = { ...defaults, ...values };
@@ -122,7 +123,7 @@ console.log("\n1. No route configured leaves the official behaviour intact");
 console.log("\n2. Non-review calls are never touched, even with a route configured");
 {
   const { ctx, listeners, dispatched } = fakeContext();
-  apply(ctx, liveConfig({ provider: "target", model: "target-model" }));
+  apply(ctx, liveConfig({ provider: "target", model: "target-model", reasonLanguage: "zh" }));
   const listener = listeners.get("llm/stream");
   const cases = {
     "ordinary chat (no fixed policy)": reviewRequest({ system: "You are a helpful assistant." }),
@@ -222,7 +223,89 @@ console.log("\n8. The schema keeps both route fields optional and default-empty"
   const resolved = new Config({});
   check("provider defaults to empty", resolved.provider.get() === "", String(resolved.provider.get()));
   check("model defaults to empty", resolved.model.get() === "", String(resolved.model.get()));
+  check("reason language defaults to empty", resolved.reasonLanguage.get() === "", String(resolved.reasonLanguage.get()));
   check("marker defaults to REVIEW_POLICY", resolved.marker.get() === "REVIEW_POLICY", String(resolved.marker.get()));
+}
+
+console.log("\n9. Reason language is optional and works without a model route");
+for (const [language, phrase] of [["zh", "Simplified Chinese"], ["en", "write its value in English"]]) {
+  const { ctx, listeners, dispatched } = fakeContext();
+  apply(ctx, liveConfig({ reasonLanguage: language }));
+  const original = reviewRequest();
+  await through(listeners.get("llm/stream"), original);
+  const forwarded = dispatched[0];
+  check(`${language}: exactly one language-adjusted call`, dispatched.length === 1, `dispatched ${dispatched.length}`);
+  check(`${language}: session provider preserved`, forwarded?.provider === original.provider, String(forwarded?.provider));
+  check(`${language}: session model preserved`, forwarded?.model === original.model, String(forwarded?.model));
+  check(`${language}: original policy stays at the start`, forwarded?.system.startsWith(original.system), forwarded?.system);
+  check(`${language}: language instruction is appended`, forwarded?.system.includes(phrase), forwarded?.system);
+  check(`${language}: messages remain the same object`, forwarded?.messages === original.messages);
+  check(`${language}: temperature and signal are preserved`, forwarded?.temperature === 0 && forwarded?.signal === original.signal);
+}
+
+console.log("\n10. An unusable target still falls back while applying the selected reason language");
+{
+  const { ctx, listeners, dispatched, logs } = fakeContext({ providers: ["session-provider"] });
+  apply(ctx, liveConfig({ provider: "missing-provider", model: "missing-model", reasonLanguage: "zh" }));
+  const original = reviewRequest();
+  await through(listeners.get("llm/stream"), original);
+  const forwarded = dispatched[0];
+  check("one fallback call is dispatched", dispatched.length === 1, `dispatched ${dispatched.length}`);
+  check("fallback retains the session route", forwarded?.provider === original.provider && forwarded?.model === original.model);
+  check("language instruction remains active on fallback", forwarded?.system.includes("Simplified Chinese"), forwarded?.system);
+  check("unusable route is diagnosed once", logs.length === 1, String(logs.length));
+}
+
+console.log("\n11. Saving reasonLanguage persists through the Host settings bridge");
+{
+  const { ctx } = fakeContext();
+  const values = { provider: "", model: "", reasoningEffort: "", reasonLanguage: "", marker: "REVIEW_POLICY" };
+  const operations = [];
+  const handlers = new Map();
+  let revision = 7;
+  const settings = {
+    describe: () => [{ ns: "auto-review-route", revision, value: { ...values } }],
+    mutate: async (ns, ops, expected) => {
+      if (ns !== "auto-review-route" || expected !== revision) throw new Error("unexpected settings mutation");
+      operations.push(...ops);
+      for (const op of ops) if (op.op === "set") values[op.path[0]] = op.value;
+      revision += 1;
+    },
+  };
+  const child = {
+    get: (key) => key === "connection" ? { requestRejection: () => undefined } : key === "webServer" ? {
+      register: ({ path, handler }) => {
+        handlers.set(path, handler);
+        return () => handlers.delete(path);
+      },
+    } : undefined,
+    effect: (body) => {
+      const dispose = typeof body === "function" ? body() : undefined;
+      return typeof dispose === "function" ? dispose : () => {};
+    },
+  };
+  ctx.get = (key) => key === "settings" ? settings : undefined;
+  ctx.inject = (_services, callback) => {
+    callback(child);
+    return () => {};
+  };
+  apply(ctx, liveConfig({}));
+
+  const body = { values: { ...values, reasonLanguage: "zh", ignored: "not writable" }, revision };
+  const request = {
+    method: "POST",
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(JSON.stringify(body));
+    },
+  };
+  const response = {
+    writeHead(status) { this.status = status; },
+    end(text) { this.body = JSON.parse(text); },
+  };
+  await handlers.get("/api/dsh-auto-review-route/save")(request, response);
+  check("reasonLanguage is included in the settings mutation", operations.some((op) => op.path[0] === "reasonLanguage" && op.value === "zh"));
+  check("unknown fields stay excluded", !operations.some((op) => op.path[0] === "ignored"));
+  check("save response returns the persisted language", response.body?.ok === true && response.body.value.values.reasonLanguage === "zh", JSON.stringify(response.body));
 }
 
 console.log(failures === 0 ? "\nAll checks passed.\n" : `\n${failures} check(s) failed.\n`);

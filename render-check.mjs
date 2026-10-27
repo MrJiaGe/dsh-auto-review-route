@@ -197,7 +197,7 @@ console.log("\n2. Both locales carry every label the page asks for");
 check("locale namespace registered", dictionary !== undefined);
 for (const localeId of ["en", "zh"]) {
   const dict = dictionary?.[localeId];
-  const missing = ["save", "reset", "clear", "retry", "saving", "saved", "rejected", "provider", "model", "effort", "marker", "overview"].filter(
+  const missing = ["save", "reset", "clear", "retry", "saving", "saved", "rejected", "provider", "model", "effort", "reasonLanguage", "reasonLanguageNote", "reasonLanguageOfficial", "reasonLanguageZh", "reasonLanguageEn", "marker", "overview"].filter(
     (key) => typeof dict?.[key] !== "string" || dict[key].length === 0,
   );
   check(`${localeId}: all control labels are non-empty strings`, missing.length === 0, missing.join(", "));
@@ -218,6 +218,18 @@ for (const localeId of ["en", "zh"]) {
   check(`${localeId}: the clear label appears`, label.includes(dict.clear), joined.slice(0, 200));
   check(`${localeId}: the overview heading appears`, label.includes(dict.overview), joined.slice(0, 200));
   check(`${localeId}: the provider label appears`, label.includes(dict.provider), joined.slice(0, 200));
+  check(`${localeId}: the reason-language note appears`, label.includes(dict.reasonLanguageNote), joined.slice(0, 300));
+  const effortPosition = created.findIndex((node) => node.props?.id === "aar-effort");
+  const languagePosition = created.findIndex((node) => node.props?.id === "aar-reason-language");
+  const languageSelect = created[languagePosition];
+  check(`${localeId}: language selector follows reasoning effort`, languagePosition > effortPosition, `${effortPosition} -> ${languagePosition}`);
+  check(`${localeId}: language defaults to official prompt`, languageSelect?.props?.value === "", String(languageSelect?.props?.value));
+  const languageValues = (languageSelect?.children ?? []).map((option) => option.props?.value);
+  check(`${localeId}: selector offers default, zh, and en`, JSON.stringify(languageValues) === JSON.stringify(["", "zh", "en"]), JSON.stringify(languageValues));
+  const languageLabels = texts(languageSelect);
+  check(`${localeId}: Chinese option uses native and English names`, languageLabels.includes(dict.reasonLanguageZh), languageLabels.join(" | "));
+  check(`${localeId}: English option is visible`, languageLabels.includes(dict.reasonLanguageEn), languageLabels.join(" | "));
+  check(`${localeId}: official-prompt option is visible`, languageLabels.includes(dict.reasonLanguageOfficial), languageLabels.join(" | "));
 }
 
 console.log("\n4. The save control carries the label as its only child");

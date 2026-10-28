@@ -27,8 +27,14 @@ function liveConfig(values) {
   const defaults = {
     provider: "",
     model: "",
+    fallbackEnabled: false,
+    fallbackProvider: "",
+    fallbackModel: "",
     reasoningEffort: "",
     reasonLanguage: "",
+    debug: false,
+    retryEnabled: false,
+    retryAttempts: 2,
     marker: "REVIEW_POLICY",
   };
   const merged = { ...defaults, ...values };
@@ -59,12 +65,12 @@ function reviewRequest(overrides = {}) {
 }
 
 /** Minimal Cordis context: records listeners, ignores child scopes. */
-function fakeContext({ providers = ["session-provider", "target"], models = {}, efforts = {} } = {}) {
+function fakeContext({ providers = ["session-provider", "target"], models = {}, efforts = {}, stream: streamOverride } = {}) {
   const listeners = new Map();
   const dispatched = [];
   const logs = [];
   const ctx = {
-    logger: { warn: (message) => logs.push(message), info: () => {}, debug: () => {} },
+    logger: { warn: (message) => logs.push(message), info: (message) => logs.push(message), debug: () => {} },
     effect: (body) => {
       const dispose = typeof body === "function" ? body() : undefined;
       return typeof dispose === "function" ? dispose : () => {};
@@ -90,6 +96,7 @@ function fakeContext({ providers = ["session-provider", "target"], models = {}, 
       },
       stream: (options) => {
         dispatched.push(options);
+        if (streamOverride !== undefined) return streamOverride(options);
         return (async function* () {
           yield { type: "finish", reason: { kind: "stop" } };
         })();
@@ -223,7 +230,13 @@ console.log("\n8. The schema keeps both route fields optional and default-empty"
   const resolved = new Config({});
   check("provider defaults to empty", resolved.provider.get() === "", String(resolved.provider.get()));
   check("model defaults to empty", resolved.model.get() === "", String(resolved.model.get()));
+  check("fallback defaults off", resolved.fallbackEnabled.get() === false, String(resolved.fallbackEnabled.get()));
+  check("fallback provider defaults to empty", resolved.fallbackProvider.get() === "", String(resolved.fallbackProvider.get()));
+  check("fallback model defaults to empty", resolved.fallbackModel.get() === "", String(resolved.fallbackModel.get()));
   check("reason language defaults to empty", resolved.reasonLanguage.get() === "", String(resolved.reasonLanguage.get()));
+  check("debug defaults off", resolved.debug.get() === false, String(resolved.debug.get()));
+  check("automatic retry defaults off", resolved.retryEnabled.get() === false, String(resolved.retryEnabled.get()));
+  check("additional retry attempts default to two", resolved.retryAttempts.get() === 2, String(resolved.retryAttempts.get()));
   check("marker defaults to REVIEW_POLICY", resolved.marker.get() === "REVIEW_POLICY", String(resolved.marker.get()));
 }
 
@@ -259,7 +272,7 @@ console.log("\n10. An unusable target still falls back while applying the select
 console.log("\n11. Saving reasonLanguage persists through the Host settings bridge");
 {
   const { ctx } = fakeContext();
-  const values = { provider: "", model: "", reasoningEffort: "", reasonLanguage: "", marker: "REVIEW_POLICY" };
+  const values = { provider: "", model: "", fallbackEnabled: false, fallbackProvider: "", fallbackModel: "", reasoningEffort: "", reasonLanguage: "", debug: false, retryEnabled: false, retryAttempts: 2, marker: "REVIEW_POLICY" };
   const operations = [];
   const handlers = new Map();
   let revision = 7;
@@ -291,7 +304,7 @@ console.log("\n11. Saving reasonLanguage persists through the Host settings brid
   };
   apply(ctx, liveConfig({}));
 
-  const body = { values: { ...values, reasonLanguage: "zh", ignored: "not writable" }, revision };
+  const body = { values: { ...values, fallbackEnabled: true, fallbackProvider: "backup", fallbackModel: "backup-model", reasonLanguage: "zh", debug: true, retryEnabled: true, retryAttempts: 3, ignored: "not writable" }, revision };
   const request = {
     method: "POST",
     async *[Symbol.asyncIterator]() {
@@ -304,9 +317,465 @@ console.log("\n11. Saving reasonLanguage persists through the Host settings brid
   };
   await handlers.get("/api/dsh-auto-review-route/save")(request, response);
   check("reasonLanguage is included in the settings mutation", operations.some((op) => op.path[0] === "reasonLanguage" && op.value === "zh"));
+  check("debug is persisted as a boolean", operations.some((op) => op.path[0] === "debug" && op.value === true));
+  check("retry toggle and count are persisted", operations.some((op) => op.path[0] === "retryEnabled" && op.value === true) && operations.some((op) => op.path[0] === "retryAttempts" && op.value === 3));
+  check("fallback fields are persisted", operations.some((op) => op.path[0] === "fallbackEnabled" && op.value === true) && operations.some((op) => op.path[0] === "fallbackProvider" && op.value === "backup") && operations.some((op) => op.path[0] === "fallbackModel" && op.value === "backup-model"));
   check("unknown fields stay excluded", !operations.some((op) => op.path[0] === "ignored"));
-  check("save response returns the persisted language", response.body?.ok === true && response.body.value.values.reasonLanguage === "zh", JSON.stringify(response.body));
+  check("save response returns persisted settings", response.body?.ok === true && response.body.value.values.reasonLanguage === "zh" && response.body.value.values.debug === true && response.body.value.values.retryEnabled === true && response.body.value.values.retryAttempts === 3 && response.body.value.values.fallbackEnabled === true && response.body.value.values.fallbackProvider === "backup" && response.body.value.values.fallbackModel === "backup-model", JSON.stringify(response.body));
+
+  const invalidBody = { values: { retryAttempts: 6 }, revision };
+  const invalidRequest = {
+    method: "POST",
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(JSON.stringify(invalidBody));
+    },
+  };
+  const invalidResponse = {
+    writeHead(status) { this.status = status; },
+    end(text) { this.body = JSON.parse(text); },
+  };
+  const operationCount = operations.length;
+  await handlers.get("/api/dsh-auto-review-route/save")(invalidRequest, invalidResponse);
+  check("out-of-range retry count is rejected without mutation", invalidResponse.body?.code === "invalid-value" && operations.length === operationCount, JSON.stringify(invalidResponse.body));
+
+  const incompleteRequest = {
+    method: "POST",
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(JSON.stringify({ values: { fallbackProvider: "backup" }, revision }));
+    },
+  };
+  const incompleteResponse = {
+    writeHead(status) { this.status = status; },
+    end(text) { this.body = JSON.parse(text); },
+  };
+  await handlers.get("/api/dsh-auto-review-route/save")(incompleteRequest, incompleteResponse);
+  check("incomplete fallback route is rejected without mutation", incompleteResponse.body?.code === "invalid-value" && operations.length === operationCount, JSON.stringify(incompleteResponse.body));
 }
 
-console.log(failures === 0 ? "\nAll checks passed.\n" : `\n${failures} check(s) failed.\n`);
+console.log("\n12. Debug logging captures causes without recording request content");
+{
+  const root = Object.assign(new Error("socket hang up at https://private.example/path?api_key=SECRET"), { code: "ECONNRESET" });
+  const transport = new Error("DeepSeek Messages transport failed", { cause: root });
+  const { ctx, listeners, logs } = fakeContext({
+    stream: () => (async function* () { throw transport; })(),
+  });
+  apply(ctx, liveConfig({ provider: "target", model: "flash", debug: true }));
+  try {
+    await through(listeners.get("llm/stream"), reviewRequest());
+  } catch {}
+  const records = logs
+    .filter((line) => line.startsWith("auto-review-route: debug "))
+    .map((line) => JSON.parse(line.slice("auto-review-route: debug ".length)));
+  const finished = records.find((entry) => entry.event === "review.finished");
+  const rendered = JSON.stringify(records);
+  check("a thrown transport error is recorded", finished?.outcome === "threw", JSON.stringify(finished));
+  check("nested cause code is retained", rendered.includes("ECONNRESET"), rendered);
+  check("effective route is recorded", finished?.effectiveRoute?.provider === "target" && finished?.effectiveRoute?.model === "flash");
+  check("credentials and URL are redacted", !rendered.includes("SECRET") && !rendered.includes("private.example"), rendered);
+  check("prompt and message text are not recorded", !rendered.includes("REVIEW_POLICY") && !rendered.includes("ENVIRONMENT") && !rendered.includes("PENDING_ACTION"), rendered);
+}
+
+console.log("\n13. Structured LLM finish failures are captured without chunk text");
+{
+  const { ctx, listeners, logs } = fakeContext({
+    stream: () => (async function* () {
+      yield { type: "text-delta", text: "private streamed content" };
+      yield { type: "finish", reason: { kind: "error", failure: { code: "TRANSPORT", status: 502, message: "upstream failed" } } };
+    })(),
+  });
+  apply(ctx, liveConfig({ provider: "target", model: "flash", debug: true }));
+  await through(listeners.get("llm/stream"), reviewRequest());
+  const records = logs.filter((line) => line.startsWith("auto-review-route: debug "));
+  const rendered = records.join("\n");
+  check("finish failure code and status are logged", rendered.includes("TRANSPORT") && rendered.includes("502"), rendered);
+  check("streamed text is never logged", !rendered.includes("private streamed content"), rendered);
+  check("finish error is distinguishable", rendered.includes("finishKind") && rendered.includes("error"), rendered);
+}
+
+console.log("\n14. Debug logging identifies streams that end without a finish chunk");
+{
+  const { ctx, listeners, logs } = fakeContext({
+    stream: () => (async function* () { yield { type: "text-delta", text: "partial" }; })(),
+  });
+  apply(ctx, liveConfig({ provider: "target", model: "flash", debug: true }));
+  await through(listeners.get("llm/stream"), reviewRequest());
+  const record = logs
+    .filter((line) => line.startsWith("auto-review-route: debug "))
+    .map((line) => JSON.parse(line.slice("auto-review-route: debug ".length)))
+    .find((entry) => entry.event === "review.finished");
+  check("missing finish chunk has a distinct outcome", record?.outcome === "ended-without-finish", JSON.stringify(record));
+}
+
+console.log("\n15. Authenticated diagnostics bridge exposes a bounded in-memory ring");
+{
+  const { ctx, listeners } = fakeContext();
+  const handlers = new Map();
+  let rejection;
+  const child = {
+    get: (key) => key === "connection" ? { requestRejection: () => rejection } : key === "webServer" ? {
+      register: ({ path, handler }) => {
+        handlers.set(path, handler);
+        return () => handlers.delete(path);
+      },
+    } : undefined,
+    effect: (body) => {
+      const dispose = typeof body === "function" ? body() : undefined;
+      return typeof dispose === "function" ? dispose : () => {};
+    },
+  };
+  ctx.inject = (_services, callback) => {
+    callback(child);
+    return () => {};
+  };
+  apply(ctx, liveConfig({ debug: true }));
+  const listener = listeners.get("llm/stream");
+  for (let i = 0; i < 51; i += 1) await through(listener, reviewRequest());
+
+  const request = { method: "POST", async *[Symbol.asyncIterator]() {} };
+  const response = {
+    writeHead(status) { this.status = status; },
+    end(text) { this.body = JSON.parse(text); },
+  };
+  await handlers.get("/api/dsh-auto-review-route/debug-logs")(request, response);
+  const records = response.body?.value?.records ?? [];
+  check("diagnostic endpoint returns success", response.status === 200 && response.body?.ok === true);
+  check("diagnostic history is bounded to 100 entries", records.length === 100, String(records.length));
+  check("ring retains the newest start and finish events", records[0]?.event === "review.started" && records.at(-1)?.event === "review.finished");
+  const rendered = JSON.stringify(records);
+  check("request prompt and message content are excluded", !rendered.includes("REVIEW_POLICY") && !rendered.includes("PENDING_ACTION"), rendered.slice(0, 160));
+
+  rejection = 403;
+  const deniedResponse = {
+    writeHead(status) { this.status = status; },
+    end(text) { this.body = JSON.parse(text); },
+  };
+  await handlers.get("/api/dsh-auto-review-route/debug-logs")(request, deniedResponse);
+  check("unauthenticated diagnostic read is denied", deniedResponse.status === 403 && deniedResponse.body?.ok === false);
+
+  rejection = undefined;
+  const clearedResponse = {
+    writeHead(status) { this.status = status; },
+    end(text) { this.body = JSON.parse(text); },
+  };
+  await handlers.get("/api/dsh-auto-review-route/debug-logs/clear")(request, clearedResponse);
+  check("clear endpoint empties the ring", clearedResponse.body?.ok === true && clearedResponse.body.value.cleared === true);
+  const rereadResponse = {
+    writeHead(status) { this.status = status; },
+    end(text) { this.body = JSON.parse(text); },
+  };
+  await handlers.get("/api/dsh-auto-review-route/debug-logs")(request, rereadResponse);
+  check("cleared diagnostics read as an empty list", rereadResponse.body?.value?.records?.length === 0);
+}
+
+console.log("\n16. Terminal failures stay failed when the consumer stops at finish");
+{
+  const { ctx, listeners, logs } = fakeContext({
+    stream: () => (async function* () {
+      yield { type: "finish", reason: { kind: "error", failure: { code: "TRANSPORT", message: "connection failed" } } };
+    })(),
+  });
+  apply(ctx, liveConfig({ provider: "target", model: "flash", debug: true }));
+  const downstream = (async function* () {
+    yield { type: "finish", reason: { kind: "stop" } };
+  })();
+  for await (const chunk of listeners.get("llm/stream")(reviewRequest(), () => downstream)) {
+    if (chunk.type === "finish") break;
+  }
+  const finished = logs
+    .filter((line) => line.startsWith("auto-review-route: debug "))
+    .map((line) => JSON.parse(line.slice("auto-review-route: debug ".length)))
+    .find((entry) => entry.event === "review.finished");
+  check("terminal error remains failed after early consumer return", finished?.outcome === "failed", JSON.stringify(finished));
+  check("finish failure remains identifiable", finished?.finishKind === "error" && finished?.failure?.code === "TRANSPORT");
+  check("request abort state is explicit", finished?.signalAborted === false, JSON.stringify(finished));
+}
+
+console.log("17. Aborted terminal finishes report an aborted signal");
+{
+  const controller = new AbortController();
+  const { ctx, listeners, logs } = fakeContext({
+    stream: () => (async function* () {
+      controller.abort();
+      yield { type: "finish", reason: { kind: "aborted", failure: { code: "ABORTED", message: "request aborted" } } };
+    })(),
+  });
+  apply(ctx, liveConfig({ provider: "target", model: "flash", debug: true }));
+  const downstream = (async function* () {
+    yield { type: "finish", reason: { kind: "stop" } };
+  })();
+  for await (const chunk of listeners.get("llm/stream")(reviewRequest({ signal: controller.signal }), () => downstream)) {
+    if (chunk.type === "finish") break;
+  }
+  const finished = logs
+    .filter((line) => line.startsWith("auto-review-route: debug "))
+    .map((line) => JSON.parse(line.slice("auto-review-route: debug ".length)))
+    .find((entry) => entry.event === "review.finished");
+  check("aborted finish remains aborted after early consumer return", finished?.outcome === "aborted", JSON.stringify(finished));
+  check("an aborted finish reports the cancelled signal", finished?.signalAborted === true, JSON.stringify(finished));
+}
+
+console.log("\\n18. Automatic retry hides failed partial output and returns the successful attempt");
+{
+  let attempt = 0;
+  const { ctx, listeners, dispatched, logs } = fakeContext({
+    providers: ["session-provider", "target"],
+    stream: () => {
+      attempt += 1;
+      return (async function* () {
+        if (attempt === 1) {
+          yield { type: "text-delta", text: "discard this failed response" };
+          yield { type: "finish", reason: { kind: "error", failure: { code: "TRANSPORT", message: "temporary failure" } } };
+          yield { type: "text-delta", text: "must not be consumed after finish" };
+          return;
+        }
+        yield { type: "text-delta", text: "final review response" };
+        yield { type: "finish", reason: { kind: "stop" } };
+      })();
+    },
+  });
+  apply(ctx, liveConfig({ provider: "target", model: "flash", retryEnabled: true, retryAttempts: 1, debug: true }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest());
+  const rendered = JSON.stringify(chunks);
+  const records = logs
+    .filter((line) => line.startsWith("auto-review-route: debug "))
+    .map((line) => JSON.parse(line.slice("auto-review-route: debug ".length)));
+  const finished = records.find((entry) => entry.event === "review.finished");
+  check("one configured retry means two total dispatches", dispatched.length === 2, String(dispatched.length));
+  check("failed partial output and error finish are withheld", !rendered.includes("discard this failed response") && !rendered.includes("TRANSPORT"), rendered);
+  check("only successful attempt is forwarded", rendered.includes("final review response") && chunks.at(-1)?.reason?.kind === "stop", rendered);
+  check("retry diagnostics and attempt count are recorded", records.some((entry) => entry.event === "review.retry") && finished?.attemptCount === 2 && finished?.retriesUsed === 1, JSON.stringify(finished));
+  check("chunks after a terminal finish are not consumed", finished?.chunkCount === 4, JSON.stringify(finished));
+}
+
+console.log("\\n19. Retries also recover the session route when no rewrite is configured");
+{
+  const { ctx, listeners, dispatched } = fakeContext();
+  apply(ctx, liveConfig({ retryEnabled: true, retryAttempts: 1 }));
+  const original = reviewRequest();
+  let nextCalls = 0;
+  const failed = (async function* () {
+    yield { type: "finish", reason: { kind: "error", failure: { code: "TRANSPORT", message: "temporary failure" } } };
+  })();
+  const chunks = [];
+  for await (const chunk of listeners.get("llm/stream")(original, () => {
+    nextCalls += 1;
+    return failed;
+  })) chunks.push(chunk);
+  check("initial request uses the original waterfall next", nextCalls === 1);
+  check("retry redispatches the unchanged session request", dispatched.length === 1 && dispatched[0] === original);
+  check("failed finish is not returned", chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
+}
+
+console.log("\\n20. Configured additional attempts cap the total number of calls");
+{
+  const { ctx, listeners, dispatched } = fakeContext({
+    providers: ["session-provider", "target"],
+    stream: () => (async function* () {
+      yield { type: "finish", reason: { kind: "error", failure: { code: "TRANSPORT", message: "still failing" } } };
+    })(),
+  });
+  apply(ctx, liveConfig({ provider: "target", model: "flash", retryEnabled: true, retryAttempts: 2 }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest());
+  check("two additional retries make exactly three dispatches", dispatched.length === 3, String(dispatched.length));
+  check("the last failure reaches the official consumer", chunks.at(-1)?.reason?.kind === "error" && chunks.at(-1)?.reason?.failure?.code === "TRANSPORT", JSON.stringify(chunks));
+}
+
+console.log("\\n21. User cancellation is never retried");
+{
+  const controller = new AbortController();
+  const { ctx, listeners, dispatched } = fakeContext({
+    stream: () => (async function* () {
+      controller.abort();
+      yield { type: "finish", reason: { kind: "aborted", failure: { code: "ABORTED", message: "cancelled" } } };
+    })(),
+  });
+  apply(ctx, liveConfig({ provider: "target", model: "flash", retryEnabled: true, retryAttempts: 5 }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest({ signal: controller.signal }));
+  check("aborted stream has one dispatch", dispatched.length === 1, String(dispatched.length));
+  check("aborted finish is preserved", chunks.at(-1)?.reason?.kind === "aborted", JSON.stringify(chunks));
+}
+
+console.log("\\n22. A thrown terminal stream error still propagates after cancellation");
+{
+  const controller = new AbortController();
+  const expected = new Error("cancelled stream transport failure");
+  const { ctx, listeners, dispatched } = fakeContext({
+    stream: () => (async function* () {
+      controller.abort();
+      throw expected;
+    })(),
+  });
+  apply(ctx, liveConfig({ provider: "target", model: "flash", retryEnabled: true, retryAttempts: 3 }));
+  let caught;
+  try {
+    await through(listeners.get("llm/stream"), reviewRequest({ signal: controller.signal }));
+  } catch (error) {
+    caught = error;
+  }
+  check("cancelled thrown stream is not retried", dispatched.length === 1, String(dispatched.length));
+  check("original stream exception propagates", caught === expected, String(caught));
+}
+
+console.log("\\n23. Automatic retry recovers a thrown transient stream error");
+{
+  let attempt = 0;
+  const { ctx, listeners, dispatched } = fakeContext({
+    stream: () => {
+      attempt += 1;
+      return (async function* () {
+        if (attempt === 1) throw new Error("temporary stream exception");
+        yield { type: "text-delta", text: "recovered response" };
+        yield { type: "finish", reason: { kind: "stop" } };
+      })();
+    },
+  });
+  apply(ctx, liveConfig({ provider: "target", model: "flash", retryEnabled: true, retryAttempts: 1 }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest());
+  check("thrown transient failure is redispatched once", dispatched.length === 2, String(dispatched.length));
+  check("successful retry response is delivered", chunks.some((chunk) => chunk.text === "recovered response") && chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
+}
+
+console.log("\\n24. The fallback route gets its own retry budget and hides both failed streams");
+{
+  let backupAttempts = 0;
+  const { ctx, listeners, dispatched, logs } = fakeContext({
+    providers: ["session-provider", "primary", "backup"],
+    stream: (options) => (async function* () {
+      if (options.provider === "primary") {
+        yield { type: "text-delta", text: "discard primary partial" };
+        yield { type: "finish", reason: { kind: "error", failure: { code: "PRIMARY_DOWN", message: "primary failed" } } };
+        return;
+      }
+      backupAttempts += 1;
+      if (backupAttempts === 1) {
+        yield { type: "text-delta", text: "discard fallback partial" };
+        yield { type: "finish", reason: { kind: "error", failure: { code: "BACKUP_DOWN", message: "backup failed once" } } };
+        return;
+      }
+      yield { type: "text-delta", text: "fallback recovered" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    })(),
+  });
+  apply(ctx, liveConfig({
+    provider: "primary",
+    model: "primary-model",
+    fallbackEnabled: true,
+    fallbackProvider: "backup",
+    fallbackModel: "backup-model",
+    retryEnabled: true,
+    retryAttempts: 1,
+    debug: true,
+  }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest());
+  const records = logs
+    .filter((line) => line.startsWith("auto-review-route: debug "))
+    .map((line) => JSON.parse(line.slice("auto-review-route: debug ".length)));
+  const finished = records.find((entry) => entry.event === "review.finished");
+  check("primary and fallback each receive one retry", dispatched.length === 4, String(dispatched.length));
+  check("fallback uses the configured provider and model", dispatched.slice(2).every((options) => options.provider === "backup" && options.model === "backup-model"));
+  check("only the final fallback chunks reach Auto-review", JSON.stringify(chunks).includes("fallback recovered") && !JSON.stringify(chunks).includes("discard") && chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
+  check("diagnostics count route retries separately from calls", finished?.attemptCount === 4 && finished?.retriesUsed === 2 && finished?.fallbackUsed === true && finished?.routeStage === "fallback", JSON.stringify(finished));
+}
+
+console.log("\\n25. Empty fallback route returns to the session model and can retry");
+{
+  let sessionNextCalls = 0;
+  const { ctx, listeners, dispatched } = fakeContext({
+    providers: ["session-provider", "primary"],
+    stream: (options) => (async function* () {
+      if (options.provider === "primary") {
+        yield { type: "finish", reason: { kind: "error", failure: { code: "PRIMARY_DOWN", message: "primary failed" } } };
+        return;
+      }
+      yield { type: "text-delta", text: "session retry recovered" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    })(),
+  });
+  apply(ctx, liveConfig({
+    provider: "primary",
+    model: "primary-model",
+    fallbackEnabled: true,
+    retryEnabled: true,
+    retryAttempts: 1,
+  }));
+  const original = reviewRequest();
+  const chunks = [];
+  const failedSession = (async function* () {
+    yield { type: "finish", reason: { kind: "error", failure: { code: "SESSION_DOWN", message: "session failed once" } } };
+  })();
+  for await (const chunk of listeners.get("llm/stream")(original, () => {
+    sessionNextCalls += 1;
+    return failedSession;
+  })) chunks.push(chunk);
+  check("session route is reached after primary retries", sessionNextCalls === 1 && dispatched.length === 3 && dispatched[0].provider === "primary" && dispatched[2].provider === "session-provider");
+  check("session fallback receives the configured retry", chunks.some((chunk) => chunk.text === "session retry recovered") && chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
+}
+
+console.log("\\n26. With retries disabled, fallback follows the first retryable failure");
+{
+  const { ctx, listeners, dispatched } = fakeContext({
+    providers: ["session-provider", "primary"],
+    stream: () => (async function* () {
+      yield { type: "finish", reason: { kind: "error", failure: { code: "PRIMARY_DOWN", message: "primary failed" } } };
+    })(),
+  });
+  apply(ctx, liveConfig({ provider: "primary", model: "primary-model", fallbackEnabled: true }));
+  const chunks = [];
+  let sessionCalls = 0;
+  for await (const chunk of listeners.get("llm/stream")(reviewRequest(), () => {
+    sessionCalls += 1;
+    return (async function* () { yield { type: "finish", reason: { kind: "stop" } }; })();
+  })) chunks.push(chunk);
+  check("one primary request immediately switches to the session route", dispatched.length === 1 && sessionCalls === 1, String(dispatched.length));
+  check("the session route response is returned", chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
+}
+
+console.log("\\n27. User cancellation does not activate a configured fallback");
+{
+  const controller = new AbortController();
+  const { ctx, listeners, dispatched } = fakeContext({
+    providers: ["session-provider", "primary", "backup"],
+    stream: () => (async function* () {
+      controller.abort();
+      yield { type: "finish", reason: { kind: "aborted", failure: { code: "ABORTED", message: "cancelled" } } };
+    })(),
+  });
+  apply(ctx, liveConfig({
+    provider: "primary",
+    model: "primary-model",
+    fallbackEnabled: true,
+    fallbackProvider: "backup",
+    fallbackModel: "backup-model",
+    retryEnabled: true,
+    retryAttempts: 2,
+  }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest({ signal: controller.signal }));
+  check("cancelled primary makes one dispatch", dispatched.length === 1, String(dispatched.length));
+  check("aborted finish is preserved", chunks.at(-1)?.reason?.kind === "aborted", JSON.stringify(chunks));
+}
+
+console.log("\\n28. A normal primary response never activates fallback");
+{
+  const { ctx, listeners, dispatched } = fakeContext({
+    providers: ["session-provider", "primary", "backup"],
+    stream: () => (async function* () {
+      yield { type: "text-delta", text: "primary response" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    })(),
+  });
+  apply(ctx, liveConfig({
+    provider: "primary",
+    model: "primary-model",
+    fallbackEnabled: true,
+    fallbackProvider: "backup",
+    fallbackModel: "backup-model",
+    retryEnabled: true,
+    retryAttempts: 2,
+  }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest());
+  check("normal primary response uses one request", dispatched.length === 1, String(dispatched.length));
+  check("normal primary response reaches Auto-review", chunks.some((chunk) => chunk.text === "primary response") && chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
+}
+
+console.log(failures === 0 ? "\\nAll checks passed.\\n" : `\\n${failures} check(s) failed.\\n`);
 process.exitCode = failures === 0 ? 0 : 1;

@@ -1,9 +1,9 @@
 {
   "name": "@mrjiage/dsh-auto-review-route",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Route DeepSeek Harness Auto-review requests to a user-chosen provider/model without touching the official auto-review plugin.",
+  "description": "Route Auto-review requests to a chosen provider/model with optional retries and fallback, without modifying the official Auto-review plugin.",
   "license": "MIT",
   "exports": {
     ".": "./index.js",

@@ -47,9 +47,17 @@ function useState(initial) {
   };
   return [hooks.slots[index], set];
 }
-function useEffect(effect) {
+function useEffect(effect, deps) {
   const index = hooks.cursor;
   hooks.cursor += 1;
+  const previous = hooks.slots[index];
+  const changed = deps === undefined
+    || previous?.kind !== "effect"
+    || deps.length !== previous.deps.length
+    || deps.some((value, position) => !Object.is(value, previous.deps[position]));
+  if (!changed) return;
+  previous?.cleanup?.();
+  hooks.slots[index] = { kind: "effect", deps: deps?.slice(), cleanup: undefined };
   hooks.effects.push({ index, effect });
 }
 function useCallback(fn) {
@@ -89,6 +97,8 @@ const bridgeAnswers = {
   providers: { ok: true, value: { providers: [{ id: "wdtn", name: "中转站" }] } },
   models: { ok: true, value: { models: [{ id: "gpt-6.1-sol", name: "gpt-6.1-sol" }] } },
   save: { ok: true, value: { revision: 4, values: {} } },
+  "debug-logs": { ok: true, value: { limit: 100, records: [] } },
+  clear: { ok: true, value: { cleared: true } },
 };
 
 globalThis.fetch = async (url) => {
@@ -160,7 +170,10 @@ async function settle(component, props) {
     tree = component(props);
     // Run effects after the render they belong to, as React does.
     const effects = hooks.effects;
-    for (const { effect } of effects) effect();
+    for (const { index, effect } of effects) {
+      const cleanup = effect();
+      if (hooks.slots[index]?.kind === "effect") hooks.slots[index].cleanup = cleanup;
+    }
     await flush();
     if (!renderRequested) return tree;
   }
@@ -197,7 +210,7 @@ console.log("\n2. Both locales carry every label the page asks for");
 check("locale namespace registered", dictionary !== undefined);
 for (const localeId of ["en", "zh"]) {
   const dict = dictionary?.[localeId];
-  const missing = ["save", "reset", "clear", "retry", "saving", "saved", "rejected", "provider", "model", "effort", "reasonLanguage", "reasonLanguageNote", "reasonLanguageOfficial", "reasonLanguageZh", "reasonLanguageEn", "marker", "overview"].filter(
+  const missing = ["save", "reset", "clear", "retry", "saving", "saved", "rejected", "provider", "model", "fallbackProvider", "fallbackModel", "sessionRoute", "sessionModelPrompt", "fallbackEnabled", "fallbackNote", "fallbackPairInvalid", "effort", "reasonLanguage", "reasonLanguageNote", "reasonLanguageOfficial", "reasonLanguageZh", "reasonLanguageEn", "debug", "debugNote", "retryEnabled", "retryNote", "retryAttempts", "retryAttemptsNote", "retryAttemptsInvalid", "debugHistory", "debugHistoryNote", "debugRefresh", "debugCopy", "debugClear", "debugLoading", "debugEmpty", "debugFailed", "debugCopied", "debugCopyFailed", "debugCleared", "marker", "overview"].filter(
     (key) => typeof dict?.[key] !== "string" || dict[key].length === 0,
   );
   check(`${localeId}: all control labels are non-empty strings`, missing.length === 0, missing.join(", "));
@@ -211,17 +224,48 @@ for (const localeId of ["en", "zh"]) {
   const page = await settle(slotRegistrations[0].component, { view: "page", t });
   const label = texts(page);
   const joined = label.join(" | ");
-  const css = label.filter((entry) => entry.startsWith(".aar"));
-  check(`${localeId}: left the loading branch`, !label.includes(dict.loading), (css[0] ?? "").slice(0, 80));
+  const css = label.find((entry) => entry.includes(".aar .aar-grid")) ?? "";
+  check(`${localeId}: left the loading branch`, !label.includes(dict.loading), css.slice(0, 80));
   check(`${localeId}: the save label appears`, label.includes(dict.save), joined.slice(0, 200));
   check(`${localeId}: the reset label appears`, label.includes(dict.reset), joined.slice(0, 200));
   check(`${localeId}: the clear label appears`, label.includes(dict.clear), joined.slice(0, 200));
   check(`${localeId}: the overview heading appears`, label.includes(dict.overview), joined.slice(0, 200));
   check(`${localeId}: the provider label appears`, label.includes(dict.provider), joined.slice(0, 200));
   check(`${localeId}: the reason-language note appears`, label.includes(dict.reasonLanguageNote), joined.slice(0, 300));
+  check(`${localeId}: fallback note explains session route and retries`, label.includes(dict.fallbackNote), joined.slice(0, 500));
+  const primaryProvider = created.find((node) => node.props?.id === "aar-primary-provider");
+  const primaryModel = created.find((node) => node.props?.id === "aar-primary-model");
+  const fallbackToggle = created.find((node) => node.props?.id === "aar-fallback-enabled");
+  const fallbackProvider = created.find((node) => node.props?.id === "aar-fallback-provider");
+  const fallbackModel = created.find((node) => node.props?.id === "aar-fallback-model");
+  check(`${localeId}: four route selectors are rendered`, [primaryProvider, primaryModel, fallbackProvider, fallbackModel].every((node) => node?.type === "select"), joined.slice(0, 500));
+  check(`${localeId}: route fields form primary then fallback pairs`, created.indexOf(primaryProvider) < created.indexOf(primaryModel) && created.indexOf(fallbackProvider) < created.indexOf(fallbackModel) && created.indexOf(fallbackModel) > created.indexOf(fallbackToggle));
+  check(`${localeId}: fallback defaults off`, fallbackToggle?.props?.type === "checkbox" && fallbackToggle.props.checked === false);
+  check(`${localeId}: fallback fields stay disabled until enabled`, fallbackProvider?.props?.disabled === true && fallbackModel?.props?.disabled === true);
+  check(`${localeId}: route grid uses equal columns and mobile collapse`, css.includes("grid-template-columns:repeat(2,minmax(0,1fr))") && css.includes("@media (max-width:600px)") && css.includes("grid-template-columns:1fr;"));
+  fallbackToggle.props.onChange({ target: { checked: true } });
+  let fallbackPage = await settle(slotRegistrations[0].component, { view: "page", t });
+  let fallbackProviderInput = created.find((node) => node.props?.id === "aar-fallback-provider");
+  check(`${localeId}: enabling fallback enables its provider picker`, fallbackProviderInput?.props?.disabled === false);
+  fallbackProviderInput.props.onChange({ target: { value: "wdtn" } });
+  fallbackPage = await settle(slotRegistrations[0].component, { view: "page", t });
+  let fallbackModelInput = created.find((node) => node.props?.id === "aar-fallback-model");
+  const saveButton = created.find((node) => node.props?.className === "aar-primary");
+  check(`${localeId}: selected fallback provider loads models`, fallbackModelInput?.props?.disabled === false && texts(fallbackModelInput).some((entry) => entry.includes("gpt-6.1-sol")), `disabled=${fallbackModelInput?.props?.disabled}; value=${fallbackModelInput?.props?.value}; text=${texts(fallbackModelInput).join(" | ")}`);
+  check(`${localeId}: incomplete fallback pair blocks saving`, saveButton?.props?.disabled === true && texts(fallbackPage).includes(dict.fallbackPairInvalid));
+  fallbackModelInput.props.onChange({ target: { value: "gpt-6.1-sol" } });
+  const configuredPage = await settle(slotRegistrations[0].component, { view: "page", t });
+  const configuredSave = created.find((node) => node.props?.className === "aar-primary");
+  check(`${localeId}: complete fallback pair can be saved`, configuredSave?.props?.disabled === false && texts(configuredPage).some((entry) => entry.includes("gpt-6.1-sol")), `disabled=${configuredSave?.props?.disabled}; value=${created.find((node) => node.props?.id === "aar-fallback-model")?.props?.value}; hasModel=${texts(configuredPage).includes("gpt-6.1-sol")}`);
   const effortPosition = created.findIndex((node) => node.props?.id === "aar-effort");
   const languagePosition = created.findIndex((node) => node.props?.id === "aar-reason-language");
+  const retryTogglePosition = created.findIndex((node) => node.props?.id === "aar-retry-enabled");
+  const retryAttemptsPosition = created.findIndex((node) => node.props?.id === "aar-retry-attempts");
+  const debugPosition = created.findIndex((node) => node.props?.id === "aar-debug");
   const languageSelect = created[languagePosition];
+  const retryToggle = created[retryTogglePosition];
+  const retryAttempts = created[retryAttemptsPosition];
+  const debugToggle = created[debugPosition];
   check(`${localeId}: language selector follows reasoning effort`, languagePosition > effortPosition, `${effortPosition} -> ${languagePosition}`);
   check(`${localeId}: language defaults to official prompt`, languageSelect?.props?.value === "", String(languageSelect?.props?.value));
   const languageValues = (languageSelect?.children ?? []).map((option) => option.props?.value);
@@ -230,9 +274,69 @@ for (const localeId of ["en", "zh"]) {
   check(`${localeId}: Chinese option uses native and English names`, languageLabels.includes(dict.reasonLanguageZh), languageLabels.join(" | "));
   check(`${localeId}: English option is visible`, languageLabels.includes(dict.reasonLanguageEn), languageLabels.join(" | "));
   check(`${localeId}: official-prompt option is visible`, languageLabels.includes(dict.reasonLanguageOfficial), languageLabels.join(" | "));
+  check(`${localeId}: retry checkbox defaults off`, retryToggle?.props?.type === "checkbox" && retryToggle.props.checked === false, String(retryToggle?.props?.checked));
+  check(`${localeId}: retry attempts default to two within the supported range`, retryAttempts?.props?.type === "number" && retryAttempts.props.value === 2 && retryAttempts.props.min === 1 && retryAttempts.props.max === 5 && retryAttempts.props.step === 1, JSON.stringify(retryAttempts?.props));
+  check(`${localeId}: retry attempts stay disabled until retry is enabled`, retryAttempts?.props?.disabled === true, String(retryAttempts?.props?.disabled));
+  check(`${localeId}: retry fields precede debug settings`, retryTogglePosition > languagePosition && retryAttemptsPosition > retryTogglePosition && debugPosition > retryAttemptsPosition);
+  check(`${localeId}: retry note is visible`, label.includes(dict.retryNote) && label.includes(dict.retryAttemptsNote), joined.slice(0, 500));
+  check(`${localeId}: debug checkbox follows retry settings`, debugPosition > retryAttemptsPosition && debugToggle?.props?.type === "checkbox", `${retryAttemptsPosition} -> ${debugPosition}`);
+  check(`${localeId}: debug defaults off`, debugToggle?.props?.checked === false, String(debugToggle?.props?.checked));
+  check(`${localeId}: debug privacy note is visible`, label.includes(dict.debugNote), joined.slice(-300));
+  check(`${localeId}: diagnostics history title and memory note render`, label.includes(dict.debugHistory) && label.includes(dict.debugHistoryNote), joined.slice(-400));
+  check(`${localeId}: refresh, copy, and clear controls render`, ["aar-debug-refresh", "aar-debug-copy", "aar-debug-clear"].every((id) => created.some((node) => node.props?.id === id)));
+  check(`${localeId}: empty diagnostics state renders`, label.includes(dict.debugEmpty), joined.slice(-300));
 }
 
-console.log("\n4. The save control carries the label as its only child");
+console.log("\n4. Diagnostic history refreshes, copies, and clears through the bridge");
+{
+  const dict = dictionary.zh;
+  const t = (key) => dict[key] ?? key;
+  bridgeAnswers["debug-logs"] = {
+    ok: true,
+    value: {
+      limit: 100,
+      records: [{ timestamp: "2026-10-28T03:00:00.000Z", event: "review.finished", outcome: "failed", failure: [{ code: "TRANSPORT", message: "test-only failure" }] }],
+    },
+  };
+  hooks.slots = [];
+  let page = await settle(slotRegistrations[0].component, { view: "page", t });
+  let refresh = created.find((node) => node.props?.id === "aar-debug-refresh");
+  check("refresh control is available", typeof refresh?.props?.onClick === "function");
+  await refresh.props.onClick();
+  page = await settle(slotRegistrations[0].component, { view: "page", t });
+  let label = texts(page).join(" | ");
+  const copy = created.find((node) => node.props?.id === "aar-debug-copy");
+  const clear = created.find((node) => node.props?.id === "aar-debug-clear");
+  check("refreshed records render their event and failure code", label.includes("review.finished") && label.includes("TRANSPORT"), label.slice(-300));
+  check("copy action is enabled when records exist", copy?.props?.disabled === false && typeof copy.props.onClick === "function");
+  check("clear action is enabled when records exist", clear?.props?.disabled === false && typeof clear.props.onClick === "function");
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  let copiedText = "";
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: { clipboard: { writeText: async (text) => { copiedText = text; } } },
+  });
+  try {
+    await copy.props.onClick();
+  } finally {
+    if (navigatorDescriptor) Object.defineProperty(globalThis, "navigator", navigatorDescriptor);
+    else delete globalThis.navigator;
+  }
+  check("copy action writes the diagnostics JSON", copiedText.includes("TRANSPORT") && copiedText.includes("review.finished"), copiedText.slice(0, 200));
+  page = await settle(slotRegistrations[0].component, { view: "page", t });
+  label = texts(page).join(" | ");
+  check("copy success is announced", label.includes(dict.debugCopied), label.slice(-200));
+  const clearAfterCopy = created.find((node) => node.props?.id === "aar-debug-clear");
+  await clearAfterCopy.props.onClick();
+  page = await settle(slotRegistrations[0].component, { view: "page", t });
+  label = texts(page).join(" | ");
+  check("clear action restores the empty state", label.includes(dict.debugEmpty), label.slice(-300));
+  bridgeAnswers["debug-logs"] = { ok: true, value: { limit: 100, records: [] } };
+}
+
+console.log("\n5. The save control carries the label as its only child");
 {
   const dict = dictionary.zh;
   const t = (key) => dict[key] ?? key;
@@ -245,7 +349,7 @@ console.log("\n4. The save control carries the label as its only child");
   check("that child is the save label", children[0] === dict.save, JSON.stringify(children[0]));
 }
 
-console.log("\n5. A read failure is reported instead of an empty page");
+console.log("\n6. A read failure is reported instead of an empty page");
 {
   const dict = dictionary.zh;
   const t = (key) => dict[key] ?? key;
@@ -259,7 +363,7 @@ console.log("\n5. A read failure is reported instead of an empty page");
   bridgeAnswers.state = original;
 }
 
-console.log("\n6. The summary view stays a one-liner");
+console.log("\n7. The summary view stays a one-liner");
 {
   const dict = dictionary.zh;
   const t = (key) => dict[key] ?? key;
@@ -267,7 +371,7 @@ console.log("\n6. The summary view stays a one-liner");
   check("unset summary is the short text", typeof summaryUnset === "string" && summaryUnset === dict.summaryUnset, String(summaryUnset));
 }
 
-console.log("\n7. The primary control does not rely on an undeclared theme token");
+console.log("\n8. The primary control does not rely on an undeclared theme token");
 {
   const source = readFileSync(new URL("./client.js", import.meta.url), "utf8");
   const css = source.slice(source.indexOf("const CSS = `"), source.indexOf("`;\n\n    /** POST one bridge endpoint"));

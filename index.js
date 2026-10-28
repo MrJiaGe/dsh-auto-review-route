@@ -22,7 +22,8 @@
  * Deliberate non-goals:
  * - No provider/model default. An unset route keeps the session's route; the
  *   optional reason-language instruction can be selected independently.
- * - No risk-policy, decision-schema, tool, retry, or lifecycle changes.
+ * - No risk-policy, decision-schema, tool, or lifecycle changes. An opt-in
+ *   retry wrapper only repeats failed reviewer model calls.
  * - A unusable configured route fails open to the official route instead of
  *   failing the review, so a typo can never block tool calls.
  *
@@ -54,6 +55,10 @@ export const inject = ["llm", "settings", "configEditor"];
  * identifies exactly one kind of request in this process.
  */
 const DEFAULT_MARKER = "REVIEW_POLICY";
+const DEFAULT_RETRY_ATTEMPTS = 2;
+const MAX_RETRY_ATTEMPTS = 5;
+const RETRY_INITIAL_DELAY_MS = 300;
+const RETRY_MAX_DELAY_MS = 3000;
 
 const REASON_LANGUAGE_INSTRUCTIONS = Object.freeze({
   zh: "When a deny response includes the optional reason field, write its value in Simplified Chinese. This affects wording only: do not change risk classification, decision, JSON keys, allowed object shapes, or any other policy. Return exactly one JSON object and no other text.",
@@ -75,6 +80,21 @@ export const Config = z.object({
     .default("")
     .description("Model id the reviewer should use on that provider. Empty keeps the session route.")
     .volatile(),
+  fallbackEnabled: z
+    .boolean()
+    .default(false)
+    .description("Switch to the configured fallback route after the primary route exhausts its attempts.")
+    .volatile(),
+  fallbackProvider: z
+    .string()
+    .default("")
+    .description("Fallback provider. Leave both fallback route fields empty to use the session route.")
+    .volatile(),
+  fallbackModel: z
+    .string()
+    .default("")
+    .description("Fallback model id. Leave both fallback route fields empty to use the session route.")
+    .volatile(),
   reasoningEffort: z
     .string()
     .default("")
@@ -87,6 +107,24 @@ export const Config = z.object({
     .string()
     .default("")
     .description("Optional language for denial reasons. Empty keeps the official prompt unchanged.")
+    .volatile(),
+  debug: z
+    .boolean()
+    .default(false)
+    .description("Keep redacted Auto-review diagnostics in Host memory and expose them through the authenticated settings page.")
+    .volatile(),
+  retryEnabled: z
+    .boolean()
+    .default(false)
+    .description("Retry failed Auto-review model calls. User cancellation and normal model responses are never retried.")
+    .volatile(),
+  retryAttempts: z
+    .natural()
+    .default(2)
+    .min(1)
+    .max(5)
+    .step(1)
+    .description("Additional retry attempts after the initial Auto-review request, from 1 to 5.")
     .volatile(),
   marker: z
     .string()
@@ -111,21 +149,220 @@ function read(config, key) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+/** Read one live boolean config field defensively. */
+function readBoolean(config, key) {
+  const field = config?.[key];
+  if (field === undefined || field === null) return false;
+  const value = typeof field.get === "function" ? field.get() : field;
+  return value === true;
+}
+
+function readRetryAttempts(config) {
+  const field = config?.retryAttempts;
+  const value = typeof field?.get === "function" ? field.get() : field;
+  return Number.isSafeInteger(value) && value >= 1 && value <= MAX_RETRY_ATTEMPTS
+    ? value
+    : DEFAULT_RETRY_ATTEMPTS;
+}
+
+function retryDelayMs(retryNumber) {
+  return Math.min(RETRY_INITIAL_DELAY_MS * 2 ** Math.max(0, retryNumber - 1), RETRY_MAX_DELAY_MS);
+}
+
+function waitForRetry(signal, delayMs) {
+  if (signal?.aborted === true) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    const finish = (continueRetry) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve(continueRetry);
+    };
+    const onAbort = () => finish(false);
+    timer = setTimeout(() => finish(true), delayMs);
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    if (signal?.aborted === true) finish(false);
+  });
+}
+
+/** Collect one route's attempts, exposing only its final attempt to the caller. */
+async function runRouteAttempts({ stage, options, maxRetries, dispatch, onChunk, onAttempt, onRetry }) {
+  let retriesUsed = 0;
+
+  for (let retryIndex = 0; retryIndex <= maxRetries; retryIndex += 1) {
+    const chunks = [];
+    let finishKind;
+    let failure;
+    let error;
+    let threw = false;
+    onAttempt({ stage, routeAttempt: retryIndex + 1, maxAttempts: maxRetries + 1 });
+
+    try {
+      for await (const chunk of dispatch(options)) {
+        onChunk(chunk);
+        chunks.push(chunk);
+        if (chunk?.type === "finish") {
+          finishKind = typeof chunk.reason?.kind === "string" ? chunk.reason.kind : "unknown";
+          failure = summarizeFailure(chunk.reason?.failure);
+          break;
+        }
+      }
+    } catch (attemptError) {
+      threw = true;
+      error = attemptError;
+      failure = summarizeError(attemptError);
+    }
+
+    const retryReason = threw
+      ? "threw"
+      : finishKind === "error"
+        ? "finish-error"
+        : finishKind === undefined
+          ? "missing-finish"
+          : undefined;
+    const cancelled = options.signal?.aborted === true || finishKind === "aborted";
+    if (retryReason !== undefined && retryIndex < maxRetries && !cancelled) {
+      const delayMs = retryDelayMs(retryIndex + 1);
+      onRetry({ stage, routeAttempt: retryIndex + 1, maxAttempts: maxRetries + 1, reason: retryReason, finishKind, failure, delayMs });
+      if (await waitForRetry(options.signal, delayMs)) {
+        retriesUsed += 1;
+        continue;
+      }
+    }
+
+    const outcome = options.signal?.aborted === true
+      ? "aborted"
+      : threw
+        ? "threw"
+        : finishKind === "error"
+          ? "failed"
+          : finishKind === "aborted"
+            ? "aborted"
+            : finishKind === undefined
+              ? "ended-without-finish"
+              : "completed";
+    return {
+      chunks,
+      error,
+      threw,
+      finishKind,
+      failure,
+      outcome,
+      retryReason: cancelled ? undefined : retryReason,
+      attempts: retryIndex + 1,
+      retriesUsed,
+    };
+  }
+}
+
+/** Bound and redact untrusted diagnostic strings before they reach the logger. */
+function safeDiagnosticText(value, limit = 400) {
+  let text;
+  try {
+    text = typeof value === "string" ? value : String(value);
+  } catch {
+    return "[unreadable]";
+  }
+  return text
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[url]")
+    .replace(/\b(bearer|basic)\s+[^\s,;]+/gi, "$1 [redacted]")
+    .replace(/\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|password|secret|cookie)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1=[redacted]")
+    .slice(0, limit);
+}
+
+function safeProperty(value, key) {
+  try {
+    return value?.[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/** Keep only a short, allowlisted cause chain; never serialize stacks or objects. */
+function summarizeError(error) {
+  const chain = [];
+  const seen = new Set();
+  let current = error;
+  for (let depth = 0; current !== undefined && current !== null && depth < 6; depth += 1) {
+    if ((typeof current !== "object" && typeof current !== "function") || seen.has(current)) break;
+    seen.add(current);
+    const name = safeProperty(current, "name");
+    const code = safeProperty(current, "code");
+    const status = safeProperty(current, "status");
+    const message = safeProperty(current, "message");
+    const entry = {};
+    if (typeof name === "string") entry.name = safeDiagnosticText(name, 80);
+    if (typeof code === "string" || typeof code === "number") entry.code = safeDiagnosticText(code, 100);
+    if (typeof status === "number" && Number.isFinite(status)) entry.status = status;
+    if (typeof message === "string") entry.message = safeDiagnosticText(message);
+    chain.push(entry);
+    current = safeProperty(current, "cause");
+  }
+  if (chain.length === 0 && error !== undefined) chain.push({ message: safeDiagnosticText(error) });
+  return chain;
+}
+
+/** Summarize the structured failure attached to an LLM finish chunk. */
+function summarizeFailure(failure) {
+  if (failure === null || typeof failure !== "object") return undefined;
+  const result = {};
+  for (const key of ["code", "message", "requestId"]) {
+    const value = safeProperty(failure, key);
+    if (typeof value === "string" || typeof value === "number") {
+      result[key] = safeDiagnosticText(value, key === "message" ? 400 : 120);
+    }
+  }
+  for (const key of ["status", "providerRetryAfterMs"]) {
+    const value = safeProperty(failure, key);
+    if (typeof value === "number" && Number.isFinite(value)) result[key] = value;
+  }
+  return result;
+}
+
 /**
  * Resolve the configured route into a decision.
  * @param config - the Loader-provided config object.
  * @returns the target route, or `undefined` when the user has not chosen one.
  */
-function target(config) {
-  const provider = read(config, "provider");
-  const model = read(config, "model");
+function routeFromConfig(config, providerKey, modelKey, effortKey) {
+  const provider = read(config, providerKey);
+  const model = read(config, modelKey);
   if (provider.length === 0 || model.length === 0) return undefined;
-  const effort = read(config, "reasoningEffort");
+  const effort = effortKey === undefined ? "" : read(config, effortKey);
   return {
     provider,
     model,
     ...effort.length === 0 ? {} : { reasoningEffort: effort },
   };
+}
+
+function target(config) {
+  return routeFromConfig(config, "provider", "model", "reasoningEffort");
+}
+
+function fallbackTarget(config) {
+  return routeFromConfig(config, "fallbackProvider", "fallbackModel");
+}
+
+function routeOptions(options, route, effort) {
+  if (route === undefined) return options;
+  const sameModel = options.provider === route.provider && options.model === route.model;
+  if (sameModel && route.reasoningEffort === undefined) return options;
+
+  const forwarded = { ...options, provider: route.provider, model: route.model };
+  if (effort === undefined) delete forwarded.reasoningEffort;
+  else forwarded.reasoningEffort = effort;
+  return forwarded;
+}
+
+function sameRoute(left, right) {
+  return left.provider === right.provider
+    && left.model === right.model
+    && left.reasoningEffort === right.reasoningEffort;
 }
 
 /**
@@ -150,8 +387,8 @@ function isReviewCall(options, marker) {
 }
 
 /**
- * Install the reviewer reroute and the two read-only list endpoints the
- * configuration page needs.
+ * Install the reviewer reroute and the read-only list endpoints the
+ * configuration page needs, plus its settings and diagnostic-log bridge.
  * @param ctx - Cordis context with the `llm` service.
  * @param config - the Loader-provided live config.
  */
@@ -164,6 +401,27 @@ export function apply(ctx, config) {
     }
   };
 
+  const debugRecords = [];
+  const debugLog = (event, fields = {}) => {
+    if (!readBoolean(config, "debug")) return;
+    try {
+      const record = {
+        timestamp: new Date().toISOString(),
+        event,
+        ...fields,
+      };
+      const serialized = JSON.stringify(record);
+      debugRecords.push(record);
+      if (debugRecords.length > DEBUG_RECORD_LIMIT) debugRecords.splice(0, debugRecords.length - DEBUG_RECORD_LIMIT);
+      const logger = ctx.logger;
+      if (typeof logger?.info === "function") {
+        logger.info.call(logger, `auto-review-route: debug ${serialized}`);
+      }
+    } catch {
+      // Diagnostics must never affect review dispatch.
+    }
+  };
+
   // One-shot diagnostics, so a persistent misconfiguration cannot flood logs.
   const reported = new Set();
   const report = (key, message) => {
@@ -172,72 +430,87 @@ export function apply(ctx, config) {
     warn(message);
   };
 
-  // Preflight result per configured route. The reviewer runs once per tool
-  // call, so the adapter lookup is cached and invalidated only when the chosen
-  // route changes; a rejected route falls back to official behaviour until then.
-  let preflightKey = "";
-  let preflightUsable = false;
-  /** The effort that survived the last preflight, for the cached key. */
-  let preflightEffort;
+  // Keep a small LRU because both the primary and fallback routes are checked,
+  // and users can edit either route while the plugin remains mounted.
+  const preflightCache = new Map();
+  const rememberPreflight = (key, result) => {
+    preflightCache.delete(key);
+    preflightCache.set(key, result);
+    if (preflightCache.size > 8) preflightCache.delete(preflightCache.keys().next().value);
+    return result;
+  };
 
-  /**
-   * Verify the configured route once per distinct target.
-   *
-   * The verdict is cached per configured value, so the effort the adapter
-   * actually accepted is cached with it: reading the raw config again on the
-   * next call would re-introduce a level this route does not declare.
-   *
-   * @param route - configured provider/model pair plus the requested effort.
-   * @param signal - the review call's cancellation.
-   * @returns the effort to send (possibly `undefined`), or `null` when the route
-   *   must not be used and the official route applies.
-   */
+  /** Verify each configured route once, retaining the accepted effort. */
   const preflight = async (route, signal) => {
-    const key = `${route.provider}\u0000${route.model}\u0000${route.reasoningEffort ?? ""}`;
-    if (key === preflightKey) return preflightUsable ? preflightEffort : null;
-
-    preflightKey = key;
-    preflightUsable = false;
-    preflightEffort = undefined;
+    const key = JSON.stringify([route.provider, route.model, route.reasoningEffort ?? ""]);
+    if (preflightCache.has(key)) {
+      const cached = preflightCache.get(key);
+      preflightCache.delete(key);
+      preflightCache.set(key, cached);
+      return cached;
+    }
 
     const llm = ctx.llm;
     let providers;
     try {
       providers = llm.listProviders();
     } catch (error) {
-      report("providers", `could not list provider routes (${describe(error)}); the official route is kept`);
-      return null;
+      debugLog("preflight.failed", {
+        stage: "providers",
+        provider: safeDiagnosticText(route.provider, 120),
+        model: safeDiagnosticText(route.model, 160),
+        error: summarizeError(error),
+      });
+      report(`providers:${route.provider}`, `could not list provider routes (${describe(error)}); configured route is unavailable`);
+      return rememberPreflight(key, null);
     }
     if (!providers.some((entry) => entry.id === route.provider)) {
+      debugLog("preflight.failed", {
+        stage: "provider-lookup",
+        provider: safeDiagnosticText(route.provider, 120),
+      });
       report(
         `provider:${route.provider}`,
-        `provider "${route.provider}" has no registered adapter; the official route is kept`,
+        `provider "${route.provider}" has no registered adapter; configured route is unavailable`,
       );
-      return null;
+      return rememberPreflight(key, null);
     }
+
     let info;
     try {
       info = await llm.resolveModelInfo(route.provider, route.model, signal);
     } catch (error) {
+      debugLog("preflight.failed", {
+        stage: "model-resolution",
+        provider: safeDiagnosticText(route.provider, 120),
+        model: safeDiagnosticText(route.model, 160),
+        error: summarizeError(error),
+      });
       report(
         `model:${route.provider}/${route.model}`,
-        `model "${route.model}" is not usable on "${route.provider}" (${describe(error)}); the official route is kept`,
+        `model "${route.model}" is not usable on "${route.provider}" (${describe(error)}); configured route is unavailable`,
       );
-      return null;
+      return rememberPreflight(key, null);
     }
+
+    let effort;
     if (route.reasoningEffort !== undefined) {
       const efforts = info.reasoning?.efforts ?? [];
       if (efforts.some((entry) => entry.id === route.reasoningEffort)) {
-        preflightEffort = route.reasoningEffort;
+        effort = route.reasoningEffort;
       } else {
+        debugLog("preflight.effort-unsupported", {
+          provider: safeDiagnosticText(route.provider, 120),
+          model: safeDiagnosticText(route.model, 160),
+          reasoningEffort: safeDiagnosticText(route.reasoningEffort, 80),
+        });
         report(
           `effort:${route.provider}/${route.model}/${route.reasoningEffort}`,
           `model "${route.model}" does not declare reasoning effort "${route.reasoningEffort}"; its default is used`,
         );
       }
     }
-    preflightUsable = true;
-    return preflightEffort;
+    return rememberPreflight(key, effort);
   };
 
   ctx.effect(
@@ -253,39 +526,199 @@ export function apply(ctx, config) {
           return;
         }
 
-        const route = target(config);
-        let forwarded = options;
-
-        if (route !== undefined && (options.provider !== route.provider || options.model !== route.model)) {
-          const effort = await preflight(route, options.signal);
-          if (effort !== null) {
-            forwarded = {
-              ...forwarded,
-              provider: route.provider,
-              model: route.model,
-              ...effort === undefined ? {} : { reasoningEffort: effort },
-            };
-          }
+        const primaryRoute = target(config);
+        const fallbackEnabled = readBoolean(config, "fallbackEnabled");
+        const fallbackProvider = read(config, "fallbackProvider");
+        const fallbackModel = read(config, "fallbackModel");
+        const fallbackRoute = fallbackTarget(config);
+        const incompleteFallbackRoute = (fallbackProvider.length === 0) !== (fallbackModel.length === 0);
+        if (fallbackEnabled && incompleteFallbackRoute) {
+          report("fallback-route:incomplete", "fallback provider and model must both be selected; the session route will be used");
         }
 
+        let baseOptions = options;
         const reasonLanguage = read(config, "reasonLanguage");
         if (Object.hasOwn(REASON_LANGUAGE_INSTRUCTIONS, reasonLanguage)) {
-          forwarded = {
-            ...forwarded,
-            system: `${forwarded.system}\n\n${REASON_LANGUAGE_INSTRUCTIONS[reasonLanguage]}`,
+          baseOptions = {
+            ...baseOptions,
+            system: `${baseOptions.system}\n\n${REASON_LANGUAGE_INSTRUCTIONS[reasonLanguage]}`,
           };
         }
 
-        if (forwarded === options) {
-          yield* next();
-          return;
-        }
+        const resolveRoute = async (route) => {
+          if (route === undefined) return { options: baseOptions, usable: true };
+          const sameModel = baseOptions.provider === route.provider && baseOptions.model === route.model;
+          if (sameModel && route.reasoningEffort === undefined) {
+            return { options: baseOptions, usable: true };
+          }
+          const effort = await preflight(route, baseOptions.signal);
+          if (effort === null) return { options: baseOptions, usable: false };
+          return { options: routeOptions(baseOptions, route, effort), usable: true };
+        };
 
-        rewritten.add(forwarded);
+        const primaryResolution = await resolveRoute(primaryRoute);
+        let fallbackResolution;
+        const resolveFallback = async () => {
+          if (fallbackResolution === undefined) fallbackResolution = await resolveRoute(fallbackRoute);
+          return fallbackResolution;
+        };
+        const retryEnabled = readBoolean(config, "retryEnabled");
+        const maxRetriesPerRoute = retryEnabled ? readRetryAttempts(config) : 0;
+        const startedAt = Date.now();
+        let firstChunkMs;
+        let chunkCount = 0;
+        const chunkTypes = {};
+        let finishKind;
+        let failure;
+        let outcome = "cancelled";
+        let attemptCount = 0;
+        let retriesUsed = 0;
+        let fallbackUsed = false;
+        let finalStage = "primary";
+        let finalOptions = primaryResolution.options;
+        const rewrittenOptions = new Set();
+        let nextCalled = false;
+        const observeChunk = (chunk) => {
+          chunkCount += 1;
+          if (firstChunkMs === undefined) firstChunkMs = Date.now() - startedAt;
+          if (typeof chunk?.type === "string") {
+            chunkTypes[chunk.type] = (chunkTypes[chunk.type] ?? 0) + 1;
+          }
+        };
+        const dispatch = (requestOptions) => {
+          if (!nextCalled && requestOptions === options) {
+            nextCalled = true;
+            return next();
+          }
+          rewritten.add(requestOptions);
+          rewrittenOptions.add(requestOptions);
+          return ctx.llm.stream(requestOptions);
+        };
+        const routeSummary = (requestOptions) => ({
+          provider: safeDiagnosticText(requestOptions.provider, 120),
+          model: safeDiagnosticText(requestOptions.model, 160),
+          ...(typeof requestOptions.reasoningEffort === "string"
+            ? { reasoningEffort: safeDiagnosticText(requestOptions.reasoningEffort, 80) }
+            : {}),
+        });
+        debugLog("review.started", {
+          configuredRoute: primaryRoute === undefined ? null : routeSummary(primaryRoute),
+          configuredFallbackRoute: !fallbackEnabled
+            ? null
+            : fallbackRoute === undefined
+              ? "session-route"
+              : routeSummary(fallbackRoute),
+          effectiveRoute: routeSummary(primaryResolution.options),
+          reasonLanguage: safeDiagnosticText(reasonLanguage || "official", 40),
+          rerouted: primaryResolution.options !== options,
+          retryEnabled,
+          maxRetriesPerRoute,
+          fallbackEnabled,
+        });
+
+        const runStage = async (stage, requestOptions) => runRouteAttempts({
+          stage,
+          options: requestOptions,
+          maxRetries: maxRetriesPerRoute,
+          dispatch,
+          onChunk: observeChunk,
+          onAttempt: () => { attemptCount += 1; },
+          onRetry: ({ stage: retryStage, routeAttempt, maxAttempts, reason, finishKind: retryFinishKind, failure: retryFailure, delayMs }) => {
+            debugLog("review.retry", {
+              stage: retryStage,
+              route: routeSummary(requestOptions),
+              attempt: attemptCount,
+              routeAttempt,
+              maxAttempts,
+              reason,
+              finishKind: retryFinishKind ?? null,
+              failure: retryFailure ?? null,
+              delayMs,
+            });
+          },
+        });
+
         try {
-          yield* ctx.llm.stream(forwarded);
+          if (maxRetriesPerRoute === 0 && !fallbackEnabled) {
+            attemptCount = 1;
+            for await (const chunk of dispatch(primaryResolution.options)) {
+              observeChunk(chunk);
+              if (chunk?.type === "finish") {
+                finishKind = typeof chunk.reason?.kind === "string" ? chunk.reason.kind : "unknown";
+                failure = summarizeFailure(chunk.reason?.failure);
+                outcome = finishKind === "error"
+                  ? "failed"
+                  : finishKind === "aborted"
+                    ? "aborted"
+                    : "completed";
+              }
+              yield chunk;
+            }
+            if (finishKind === undefined) outcome = "ended-without-finish";
+          } else {
+            let result;
+            if (!primaryResolution.usable && fallbackEnabled) {
+              fallbackUsed = true;
+              finalStage = "fallback";
+              fallbackResolution = await resolveFallback();
+              finalOptions = fallbackResolution.options;
+              debugLog("review.fallback", {
+                reason: "primary-preflight-failed",
+                from: primaryRoute === undefined ? routeSummary(baseOptions) : routeSummary(primaryRoute),
+                to: routeSummary(finalOptions),
+                primaryAttempts: 0,
+              });
+              result = await runStage("fallback", finalOptions);
+              retriesUsed += result.retriesUsed;
+            } else {
+              result = await runStage("primary", primaryResolution.options);
+              retriesUsed += result.retriesUsed;
+              if (fallbackEnabled && result.retryReason !== undefined && options.signal?.aborted !== true) {
+                fallbackResolution = await resolveFallback();
+                if (!sameRoute(primaryResolution.options, fallbackResolution.options)) {
+                  fallbackUsed = true;
+                  finalStage = "fallback";
+                  finalOptions = fallbackResolution.options;
+                  debugLog("review.fallback", {
+                    reason: result.retryReason,
+                    from: routeSummary(primaryResolution.options),
+                    to: routeSummary(finalOptions),
+                    primaryAttempts: result.attempts,
+                    maxRetriesPerRoute,
+                  });
+                  result = await runStage("fallback", finalOptions);
+                  retriesUsed += result.retriesUsed;
+                }
+              }
+            }
+
+            finishKind = result.finishKind;
+            failure = result.failure;
+            outcome = result.outcome;
+            for (const chunk of result.chunks) yield chunk;
+            if (result.threw) throw result.error;
+          }
+        } catch (error) {
+          outcome = options.signal?.aborted === true ? "aborted" : "threw";
+          failure = summarizeError(error);
+          throw error;
         } finally {
-          rewritten.delete(forwarded);
+          for (const requestOptions of rewrittenOptions) rewritten.delete(requestOptions);
+          debugLog("review.finished", {
+            effectiveRoute: routeSummary(finalOptions),
+            routeStage: finalStage,
+            fallbackUsed,
+            outcome,
+            signalAborted: options.signal?.aborted === true,
+            elapsedMs: Date.now() - startedAt,
+            firstChunkMs: firstChunkMs ?? null,
+            chunkCount,
+            chunkTypes,
+            finishKind: finishKind ?? null,
+            failure: failure ?? null,
+            attemptCount,
+            retriesUsed,
+          });
         }
       }),
     "auto-review-route: reviewer reroute",
@@ -296,8 +729,7 @@ export function apply(ctx, config) {
   ctx.effect(
     () =>
       ctx.on("llm/adapters-updated", () => {
-        preflightKey = "";
-        preflightUsable = false;
+        preflightCache.clear();
       }),
     "auto-review-route: adapter invalidation",
   );
@@ -308,26 +740,27 @@ export function apply(ctx, config) {
   // what renders once it opens. Asking Settings to suppress its auto page would
   // be one more way for this bundle to fail without adding anything.
 
-  mountRoutes(ctx);
+  mountRoutes(ctx, debugRecords);
 }
 
 /** Render one unknown throwable as a log-safe message. */
 function describe(error) {
-  return error instanceof Error ? error.message : String(error);
+  return safeDiagnosticText(error instanceof Error ? error.message : error);
 }
 
 /**
- * Largest bridge body accepted, in bytes. Both endpoints only carry a provider
- * id, so a small bound is generous.
+ * Largest JSON bridge request body accepted, in bytes. The settings and model
+ * catalog endpoints carry only a small owned-field patch or provider id.
  */
 const MAX_BODY_BYTES = 8 * 1024;
+const DEBUG_RECORD_LIMIT = 100;
 
 /** Loopback prefix shared with the browser half of this bundle. */
 const BRIDGE_PREFIX = "/api/dsh-auto-review-route";
 
 /**
- * Publish the provider and model catalogs, and the read/write path for this
- * row's own settings, to the configuration page.
+ * Publish provider/model catalogs, this row's settings read/write path, and a
+ * bounded debug-history read/clear path to the configuration page.
  *
  * Writes go through `ctx.settings`, the same service the shipping Settings
  * page uses, so a save persists exactly like any profile patch edit. The page
@@ -336,7 +769,7 @@ const BRIDGE_PREFIX = "/api/dsh-auto-review-route";
  *
  * @param ctx - Cordis context.
  */
-function mountRoutes(ctx) {
+function mountRoutes(ctx, debugRecords) {
   ctx.inject(["connection", "webServer"], (child) => {
     const connection = child.get("connection");
     const webServer = child.get("webServer");
@@ -412,6 +845,39 @@ function mountRoutes(ctx) {
       () =>
         webServer.register({
           kind: "exact",
+          path: `${BRIDGE_PREFIX}/debug-logs`,
+          handler: async (request, response) => {
+            if (!admit(request, response)) return;
+            writeJson(response, 200, {
+              ok: true,
+              value: {
+                records: JSON.parse(JSON.stringify(debugRecords)),
+                limit: DEBUG_RECORD_LIMIT,
+              },
+            });
+          },
+        }),
+      "auto-review-route: diagnostic log read",
+    );
+
+    child.effect(
+      () =>
+        webServer.register({
+          kind: "exact",
+          path: `${BRIDGE_PREFIX}/debug-logs/clear`,
+          handler: async (request, response) => {
+            if (!admit(request, response)) return;
+            debugRecords.length = 0;
+            writeJson(response, 200, { ok: true, value: { cleared: true } });
+          },
+        }),
+      "auto-review-route: diagnostic log clear",
+    );
+
+    child.effect(
+      () =>
+        webServer.register({
+          kind: "exact",
           path: `${BRIDGE_PREFIX}/state`,
           handler: async (request, response) => {
             if (!admit(request, response)) return;
@@ -443,12 +909,46 @@ function mountRoutes(ctx) {
               writeJson(response, 200, { ok: false, code: "values-required", message: "values object is required" });
               return;
             }
-            // Only the five owned keys are writable; a stray field must not be
+            const hasFallbackProvider = Object.hasOwn(values, "fallbackProvider");
+            const hasFallbackModel = Object.hasOwn(values, "fallbackModel");
+            if (hasFallbackProvider !== hasFallbackModel) {
+              writeJson(response, 200, { ok: false, code: "invalid-value", message: "fallback provider and model must be saved together" });
+              return;
+            }
+            if (hasFallbackProvider) {
+              const provider = values.fallbackProvider;
+              const model = values.fallbackModel;
+              if (typeof provider !== "string" || typeof model !== "string") {
+                writeJson(response, 200, { ok: false, code: "invalid-value", message: "fallback provider and model must be strings" });
+                return;
+              }
+              if ((provider.trim().length === 0) !== (model.trim().length === 0)) {
+                writeJson(response, 200, { ok: false, code: "invalid-value", message: "fallback provider and model must both be selected, or both be empty" });
+                return;
+              }
+            }
+            // Only the owned keys are writable; a stray field must not be
             // persisted into the profile patch.
             const ops = [];
-            for (const key of ["provider", "model", "reasoningEffort", "reasonLanguage", "marker"]) {
+            for (const key of ["provider", "model", "fallbackEnabled", "fallbackProvider", "fallbackModel", "reasoningEffort", "reasonLanguage", "debug", "retryEnabled", "retryAttempts", "marker"]) {
               if (!Object.hasOwn(values, key)) continue;
               const raw = values[key];
+              if (key === "debug" || key === "retryEnabled" || key === "fallbackEnabled") {
+                if (typeof raw !== "boolean") {
+                  writeJson(response, 200, { ok: false, code: "invalid-value", message: `"${key}" must be a boolean` });
+                  return;
+                }
+                ops.push({ op: "set", path: [key], value: raw });
+                continue;
+              }
+              if (key === "retryAttempts") {
+                if (!Number.isSafeInteger(raw) || raw < 1 || raw > MAX_RETRY_ATTEMPTS) {
+                  writeJson(response, 200, { ok: false, code: "invalid-value", message: `"${key}" must be an integer from 1 to ${MAX_RETRY_ATTEMPTS}` });
+                  return;
+                }
+                ops.push({ op: "set", path: [key], value: raw });
+                continue;
+              }
               if (typeof raw !== "string") {
                 writeJson(response, 200, { ok: false, code: "invalid-value", message: `"${key}" must be a string` });
                 return;

@@ -1,6 +1,6 @@
 {
   "name": "@mrjiage/dsh-auto-review-route",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Route Auto-review requests to a chosen provider/model with optional retries and fallback, without modifying the official Auto-review plugin.",

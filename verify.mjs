@@ -64,6 +64,16 @@ function reviewRequest(overrides = {}) {
   });
 }
 
+function* validReviewResponse(label) {
+  let index = 0;
+  if (label !== undefined) {
+    yield { type: "reasoning-delta", index, text: label };
+    index += 1;
+  }
+  yield { type: "text-delta", index, text: '{"risk":"low","decision":"allow"}' };
+  yield { type: "finish", reason: { kind: "stop" } };
+}
+
 /** Minimal Cordis context: records listeners, ignores child scopes. */
 function fakeContext({ providers = ["session-provider", "target"], models = {}, efforts = {}, stream: streamOverride } = {}) {
   const listeners = new Map();
@@ -98,7 +108,7 @@ function fakeContext({ providers = ["session-provider", "target"], models = {}, 
         dispatched.push(options);
         if (streamOverride !== undefined) return streamOverride(options);
         return (async function* () {
-          yield { type: "finish", reason: { kind: "stop" } };
+          yield* validReviewResponse();
         })();
       },
     },
@@ -528,8 +538,7 @@ console.log("\\n18. Automatic retry hides failed partial output and returns the 
           yield { type: "text-delta", text: "must not be consumed after finish" };
           return;
         }
-        yield { type: "text-delta", text: "final review response" };
-        yield { type: "finish", reason: { kind: "stop" } };
+        yield* validReviewResponse("final review response");
       })();
     },
   });
@@ -544,7 +553,7 @@ console.log("\\n18. Automatic retry hides failed partial output and returns the 
   check("failed partial output and error finish are withheld", !rendered.includes("discard this failed response") && !rendered.includes("TRANSPORT"), rendered);
   check("only successful attempt is forwarded", rendered.includes("final review response") && chunks.at(-1)?.reason?.kind === "stop", rendered);
   check("retry diagnostics and attempt count are recorded", records.some((entry) => entry.event === "review.retry") && finished?.attemptCount === 2 && finished?.retriesUsed === 1, JSON.stringify(finished));
-  check("chunks after a terminal finish are not consumed", finished?.chunkCount === 4, JSON.stringify(finished));
+  check("chunks after a terminal finish are not consumed", finished?.chunkCount === 5, JSON.stringify(finished));
 }
 
 console.log("\\n19. Retries also recover the session route when no rewrite is configured");
@@ -624,8 +633,7 @@ console.log("\\n23. Automatic retry recovers a thrown transient stream error");
       attempt += 1;
       return (async function* () {
         if (attempt === 1) throw new Error("temporary stream exception");
-        yield { type: "text-delta", text: "recovered response" };
-        yield { type: "finish", reason: { kind: "stop" } };
+        yield* validReviewResponse("recovered response");
       })();
     },
   });
@@ -652,8 +660,7 @@ console.log("\\n24. The fallback route gets its own retry budget and hides both 
         yield { type: "finish", reason: { kind: "error", failure: { code: "BACKUP_DOWN", message: "backup failed once" } } };
         return;
       }
-      yield { type: "text-delta", text: "fallback recovered" };
-      yield { type: "finish", reason: { kind: "stop" } };
+      yield* validReviewResponse("fallback recovered");
     })(),
   });
   apply(ctx, liveConfig({
@@ -687,8 +694,7 @@ console.log("\\n25. Empty fallback route returns to the session model and can re
         yield { type: "finish", reason: { kind: "error", failure: { code: "PRIMARY_DOWN", message: "primary failed" } } };
         return;
       }
-      yield { type: "text-delta", text: "session retry recovered" };
-      yield { type: "finish", reason: { kind: "stop" } };
+      yield* validReviewResponse("session retry recovered");
     })(),
   });
   apply(ctx, liveConfig({
@@ -724,7 +730,7 @@ console.log("\\n26. With retries disabled, fallback follows the first retryable 
   let sessionCalls = 0;
   for await (const chunk of listeners.get("llm/stream")(reviewRequest(), () => {
     sessionCalls += 1;
-    return (async function* () { yield { type: "finish", reason: { kind: "stop" } }; })();
+    return (async function* () { yield* validReviewResponse(); })();
   })) chunks.push(chunk);
   check("one primary request immediately switches to the session route", dispatched.length === 1 && sessionCalls === 1, String(dispatched.length));
   check("the session route response is returned", chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
@@ -759,8 +765,7 @@ console.log("\\n28. A normal primary response never activates fallback");
   const { ctx, listeners, dispatched } = fakeContext({
     providers: ["session-provider", "primary", "backup"],
     stream: () => (async function* () {
-      yield { type: "text-delta", text: "primary response" };
-      yield { type: "finish", reason: { kind: "stop" } };
+      yield* validReviewResponse("primary response");
     })(),
   });
   apply(ctx, liveConfig({
@@ -775,6 +780,253 @@ console.log("\\n28. A normal primary response never activates fallback");
   const chunks = await through(listeners.get("llm/stream"), reviewRequest());
   check("normal primary response uses one request", dispatched.length === 1, String(dispatched.length));
   check("normal primary response reaches Auto-review", chunks.some((chunk) => chunk.text === "primary response") && chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
+}
+
+console.log("\\n29. An invalid primary decision is discarded before fallback output");
+{
+  const { ctx, listeners, dispatched, logs } = fakeContext({
+    providers: ["session-provider", "primary", "backup"],
+    stream: (options) => (async function* () {
+      if (options.provider === "primary") {
+        yield { type: "text-delta", index: 0, text: "not JSON" };
+        yield { type: "finish", reason: { kind: "stop" } };
+        return;
+      }
+      yield* validReviewResponse("valid fallback");
+    })(),
+  });
+  apply(ctx, liveConfig({
+    provider: "primary",
+    model: "primary-model",
+    fallbackEnabled: true,
+    fallbackProvider: "backup",
+    fallbackModel: "backup-model",
+    debug: true,
+  }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest());
+  const rendered = JSON.stringify(chunks);
+  const records = logs
+    .filter((line) => line.startsWith("auto-review-route: debug "))
+    .map((line) => JSON.parse(line.slice("auto-review-route: debug ".length)));
+  const fallback = records.find((entry) => entry.event === "review.fallback");
+  const finished = records.find((entry) => entry.event === "review.finished");
+  check("invalid primary response activates configured fallback", dispatched.length === 2 && dispatched[1].provider === "backup");
+  check("primary body is withheld and valid fallback is delivered", !rendered.includes("not JSON") && rendered.includes("valid fallback") && chunks.at(-1)?.reason?.kind === "stop", rendered);
+  check("parse failure is diagnosed without response content", fallback?.reason === "invalid-result" && finished?.fallbackUsed === true && finished?.outcome === "completed" && !JSON.stringify(records).includes("not JSON"), JSON.stringify(records));
+}
+
+console.log("\\n30. Invalid primary and fallback decisions consume each route budget");
+{
+  let primaryAttempts = 0;
+  let backupAttempts = 0;
+  const { ctx, listeners, dispatched, logs } = fakeContext({
+    providers: ["session-provider", "primary", "backup"],
+    stream: (options) => (async function* () {
+      if (options.provider === "primary") {
+        primaryAttempts += 1;
+        yield { type: "text-delta", index: 0, text: `bad primary ${primaryAttempts}` };
+      } else {
+        backupAttempts += 1;
+        const text = backupAttempts === 1
+          ? '{"risk":"high","decision":"allow"}'
+          : '{"risk":"medium","decision":"deny","reason":"reviewed"}';
+        yield { type: "text-delta", index: 0, text };
+      }
+      yield { type: "finish", reason: { kind: "stop" } };
+    })(),
+  });
+  apply(ctx, liveConfig({
+    provider: "primary",
+    model: "primary-model",
+    fallbackEnabled: true,
+    fallbackProvider: "backup",
+    fallbackModel: "backup-model",
+    retryEnabled: true,
+    retryAttempts: 1,
+    debug: true,
+  }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest());
+  const rendered = JSON.stringify(chunks);
+  const records = logs
+    .filter((line) => line.startsWith("auto-review-route: debug "))
+    .map((line) => JSON.parse(line.slice("auto-review-route: debug ".length)));
+  const retries = records.filter((entry) => entry.event === "review.retry");
+  const finished = records.find((entry) => entry.event === "review.finished");
+  check("both routes use two total attempts", dispatched.length === 4 && primaryAttempts === 2 && backupAttempts === 2, String(dispatched.length));
+  check("invalid result retries are recorded per route", retries.some((entry) => entry.stage === "primary" && entry.reason === "invalid-result") && retries.some((entry) => entry.stage === "fallback" && entry.reason === "invalid-result"), JSON.stringify(retries));
+  check("only the last valid fallback attempt is exposed", !rendered.includes("bad primary") && !rendered.includes("high\\\",\\\"decision\\\":\\\"allow") && rendered.includes("reviewed") && chunks.at(-1)?.reason?.kind === "stop", rendered);
+  check("retry accounting includes both routes", finished?.attemptCount === 4 && finished?.retriesUsed === 2 && finished?.routeStage === "fallback", JSON.stringify(finished));
+}
+
+console.log("\\n31. A terminal fallback transport error is preserved without another route");
+{
+  const { ctx, listeners, dispatched, logs } = fakeContext({
+    providers: ["session-provider", "primary", "backup"],
+    stream: (options) => (async function* () {
+      if (options.provider === "primary") {
+        yield { type: "text-delta", index: 0, text: "invalid primary JSON" };
+        yield { type: "finish", reason: { kind: "stop" } };
+        return;
+      }
+      yield { type: "finish", reason: { kind: "error", failure: { code: "BACKUP_DOWN", message: "fallback unavailable" } } };
+    })(),
+  });
+  apply(ctx, liveConfig({
+    provider: "primary",
+    model: "primary-model",
+    fallbackEnabled: true,
+    fallbackProvider: "backup",
+    fallbackModel: "backup-model",
+    debug: true,
+  }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest());
+  const finished = logs
+    .filter((line) => line.startsWith("auto-review-route: debug "))
+    .map((line) => JSON.parse(line.slice("auto-review-route: debug ".length)))
+    .find((entry) => entry.event === "review.finished");
+  check("fallback failure does not loop or dispatch a third route", dispatched.length === 2, String(dispatched.length));
+  check("official consumer receives the terminal fallback error", chunks.at(-1)?.reason?.kind === "error" && chunks.at(-1)?.reason?.failure?.code === "BACKUP_DOWN", JSON.stringify(chunks));
+  check("final diagnostics remain failed at fallback stage", finished?.fallbackUsed === true && finished?.routeStage === "fallback" && finished?.outcome === "failed", JSON.stringify(finished));
+}
+
+console.log("\\n32. An invalid session-route fallback remains final and fail-closed");
+{
+  let sessionCalls = 0;
+  const { ctx, listeners, dispatched, logs } = fakeContext({
+    providers: ["session-provider", "primary"],
+    stream: () => (async function* () {
+      yield { type: "text-delta", index: 0, text: "invalid primary JSON" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    })(),
+  });
+  apply(ctx, liveConfig({ provider: "primary", model: "primary-model", fallbackEnabled: true, debug: true }));
+  const chunks = [];
+  for await (const chunk of listeners.get("llm/stream")(reviewRequest(), () => {
+    sessionCalls += 1;
+    return (async function* () {
+      yield { type: "text-delta", index: 0, text: "not JSON from session" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    })();
+  })) chunks.push(chunk);
+  const rendered = JSON.stringify(chunks);
+  const finished = logs
+    .filter((line) => line.startsWith("auto-review-route: debug "))
+    .map((line) => JSON.parse(line.slice("auto-review-route: debug ".length)))
+    .find((entry) => entry.event === "review.finished");
+  check("session fallback is called once and no recursive route is dispatched", sessionCalls === 1 && dispatched.length === 1, `${sessionCalls}/${dispatched.length}`);
+  check("invalid primary is hidden and final invalid session output reaches official parser", !rendered.includes("invalid primary JSON") && rendered.includes("not JSON from session"), rendered);
+  check("final invalid session response is diagnosed, not accepted", finished?.fallbackUsed === true && finished?.routeStage === "fallback" && finished?.outcome === "invalid-result", JSON.stringify(finished));
+  const sessionText = chunks.find((chunk) => chunk.type === "text-delta")?.text;
+  let officialParserRejects = false;
+  try {
+    JSON.parse(sessionText);
+  } catch {
+    officialParserRejects = true;
+  }
+  check("the final session payload still fails official JSON parsing", officialParserRejects, String(sessionText));
+}
+
+console.log("\\n33. Valid allow and deny decisions never activate fallback");
+{
+  for (const [label, text] of [
+    ["allow", '{"risk":"low","decision":"allow"}'],
+    ["deny", '{"risk":"high","decision":"deny","reason":"unsafe"}'],
+  ]) {
+    const { ctx, listeners, dispatched } = fakeContext({
+      providers: ["session-provider", "primary", "backup"],
+      stream: () => (async function* () {
+        yield { type: "text-delta", index: 0, text };
+        yield { type: "finish", reason: { kind: "stop" } };
+      })(),
+    });
+    apply(ctx, liveConfig({
+      provider: "primary",
+      model: "primary-model",
+      fallbackEnabled: true,
+      fallbackProvider: "backup",
+      fallbackModel: "backup-model",
+      retryEnabled: true,
+      retryAttempts: 1,
+    }));
+    await through(listeners.get("llm/stream"), reviewRequest());
+    check(`valid ${label} decision has one dispatch`, dispatched.length === 1, String(dispatched.length));
+  }
+}
+
+console.log("\\n34. Non-decision block shapes and non-stop finishes trigger fallback");
+{
+  const invalidCases = [
+    {
+      label: "duplicate root member",
+      chunks: [
+        { type: "text-delta", index: 0, text: '{"risk":"low","decision":"allow","risk":"low"}' },
+        { type: "finish", reason: { kind: "stop" } },
+      ],
+    },
+    {
+      label: "text followed by reasoning",
+      chunks: [
+        { type: "text-delta", index: 0, text: '{"risk":"low","decision":"allow"}' },
+        { type: "reasoning-delta", index: 1, text: "late reasoning" },
+        { type: "finish", reason: { kind: "stop" } },
+      ],
+    },
+    {
+      label: "max-tokens finish",
+      chunks: [
+        { type: "text-delta", index: 0, text: '{"risk":"low","decision":"allow"}' },
+        { type: "finish", reason: { kind: "max-tokens" } },
+      ],
+    },
+  ];
+  for (const invalidCase of invalidCases) {
+    const { ctx, listeners, dispatched } = fakeContext({
+      providers: ["session-provider", "primary", "backup"],
+      stream: (options) => (async function* () {
+        if (options.provider === "primary") {
+          yield* invalidCase.chunks;
+          return;
+        }
+        yield* validReviewResponse("recovered after invalid protocol");
+      })(),
+    });
+    apply(ctx, liveConfig({
+      provider: "primary",
+      model: "primary-model",
+      fallbackEnabled: true,
+      fallbackProvider: "backup",
+      fallbackModel: "backup-model",
+    }));
+    const chunks = await through(listeners.get("llm/stream"), reviewRequest());
+    check(`${invalidCase.label} falls back once`, dispatched.length === 2 && dispatched[1].provider === "backup" && chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
+  }
+}
+
+console.log("\\n35. Official block framing and usage chunks remain valid");
+{
+  const { ctx, listeners, dispatched } = fakeContext({
+    providers: ["session-provider", "primary", "backup"],
+    stream: () => (async function* () {
+      yield { type: "block-start", index: 0, blockType: "reasoning" };
+      yield { type: "reasoning-delta", index: 0, text: "brief reasoning" };
+      yield { type: "block-end", index: 0, block: { type: "reasoning", text: "brief reasoning" } };
+      yield { type: "block-start", index: 1, blockType: "text" };
+      yield { type: "text-delta", index: 1, text: '{"risk":"medium","decision":"allow"}' };
+      yield { type: "usage", usage: { inputTokens: 8, outputTokens: 4 } };
+      yield { type: "block-end", index: 1, block: { type: "text", text: '{"risk":"medium","decision":"allow"}' } };
+      yield { type: "finish", reason: { kind: "stop" } };
+    })(),
+  });
+  apply(ctx, liveConfig({
+    provider: "primary",
+    model: "primary-model",
+    fallbackEnabled: true,
+    fallbackProvider: "backup",
+    fallbackModel: "backup-model",
+  }));
+  const chunks = await through(listeners.get("llm/stream"), reviewRequest());
+  check("closed reasoning/text blocks and usage use one primary dispatch", dispatched.length === 1, String(dispatched.length));
+  check("usage and protocol-valid framed blocks reach the official consumer", chunks.some((chunk) => chunk.type === "usage") && chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
 }
 
 console.log(failures === 0 ? "\\nAll checks passed.\\n" : `\\n${failures} check(s) failed.\\n`);

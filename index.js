@@ -188,6 +188,127 @@ function waitForRetry(signal, delayMs) {
   });
 }
 
+/** Mirror the official decision grammar before any attempt output is released. */
+function topLevelMemberCount(text) {
+  const withoutStrings = text.replace(/"(?:\\.|[^"\\])*"/gs, "");
+  let depth = 0;
+  let count = 0;
+  for (const character of withoutStrings) {
+    if (character === "{" || character === "[") depth += 1;
+    else if (character === "}" || character === "]") depth -= 1;
+    else if (character === ":" && depth === 1) count += 1;
+  }
+  return count;
+}
+
+function decisionParseFailure(text) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return "invalid-json";
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return "invalid-decision-object";
+
+  const keys = Object.keys(value);
+  if (topLevelMemberCount(text) !== keys.length) return "duplicate-decision-member";
+  const has = (key) => Object.prototype.hasOwnProperty.call(value, key);
+  const risk = value.risk;
+  const decision = value.decision;
+
+  if (
+    keys.length === 2
+    && has("risk")
+    && has("decision")
+    && ((risk === "low" || risk === "medium") && decision === "allow"
+      || (risk === "medium" || risk === "high") && decision === "deny")
+  ) return undefined;
+
+  if (
+    keys.length === 3
+    && has("risk")
+    && has("decision")
+    && has("reason")
+    && (risk === "medium" || risk === "high")
+    && decision === "deny"
+    && typeof value.reason === "string"
+  ) return undefined;
+
+  return "invalid-decision-shape";
+}
+
+function assembleDecisionBlocks(chunks) {
+  const partials = new Map();
+  const order = [];
+  const ensure = (index, type) => {
+    if (!partials.has(index)) {
+      partials.set(index, { type, text: "", block: undefined, closed: false });
+      order.push(index);
+    }
+    const partial = partials.get(index);
+    if (partial.type === undefined && type !== undefined) partial.type = type;
+    return partial;
+  };
+
+  for (const chunk of chunks) {
+    switch (chunk?.type) {
+      case "block-start":
+        ensure(chunk.index, chunk.blockType);
+        break;
+      case "block-end": {
+        if (chunk.block === null || typeof chunk.block !== "object") return undefined;
+        const partial = ensure(chunk.index, chunk.block.type);
+        if (!partial.closed) {
+          partial.block = chunk.block;
+          partial.closed = true;
+        }
+        break;
+      }
+      case "text-delta":
+      case "reasoning-delta": {
+        if (typeof chunk.text !== "string") return undefined;
+        const type = chunk.type === "text-delta" ? "text" : "reasoning";
+        const partial = ensure(chunk.index, type);
+        if (!partial.closed) partial.text += chunk.text;
+        break;
+      }
+      case "tool-call-delta": {
+        const partial = ensure(chunk.index, "tool-call");
+        if (!partial.closed && partial.type === undefined) partial.type = "tool-call";
+        break;
+      }
+      case "usage":
+      case "finish":
+        break;
+      default:
+        return undefined;
+    }
+  }
+
+  return order.map((index) => {
+    const partial = partials.get(index);
+    return partial.block ?? { type: partial.type, text: partial.text };
+  });
+}
+
+function reviewResultFailure(chunks) {
+  const finish = chunks.at(-1);
+  if (finish?.type !== "finish" || finish.reason?.kind !== "stop") return "invalid-finish";
+
+  let blocks;
+  try {
+    blocks = assembleDecisionBlocks(chunks);
+  } catch {
+    return "invalid-blocks";
+  }
+  if (!Array.isArray(blocks) || blocks.length === 0) return "invalid-blocks";
+  const decisionBlock = blocks.at(-1);
+  if (decisionBlock?.type !== "text" || blocks.slice(0, -1).some((block) => block?.type !== "reasoning")) {
+    return "invalid-blocks";
+  }
+  return decisionParseFailure(decisionBlock.text);
+}
+
 /** Collect one route's attempts, exposing only its final attempt to the caller. */
 async function runRouteAttempts({ stage, options, maxRetries, dispatch, onChunk, onAttempt, onRetry }) {
   let retriesUsed = 0;
@@ -216,13 +337,22 @@ async function runRouteAttempts({ stage, options, maxRetries, dispatch, onChunk,
       failure = summarizeError(attemptError);
     }
 
+    const validationFailure = !threw && finishKind !== undefined && finishKind !== "error" && finishKind !== "aborted"
+      ? reviewResultFailure(chunks)
+      : undefined;
+    if (validationFailure !== undefined) {
+      failure = { code: "INVALID_REVIEW_RESULT", message: validationFailure };
+    }
+
     const retryReason = threw
       ? "threw"
       : finishKind === "error"
         ? "finish-error"
         : finishKind === undefined
           ? "missing-finish"
-          : undefined;
+          : validationFailure !== undefined
+            ? "invalid-result"
+            : undefined;
     const cancelled = options.signal?.aborted === true || finishKind === "aborted";
     if (retryReason !== undefined && retryIndex < maxRetries && !cancelled) {
       const delayMs = retryDelayMs(retryIndex + 1);
@@ -241,9 +371,11 @@ async function runRouteAttempts({ stage, options, maxRetries, dispatch, onChunk,
           ? "failed"
           : finishKind === "aborted"
             ? "aborted"
-            : finishKind === undefined
-              ? "ended-without-finish"
-              : "completed";
+            : validationFailure !== undefined
+              ? "invalid-result"
+              : finishKind === undefined
+                ? "ended-without-finish"
+                : "completed";
     return {
       chunks,
       error,

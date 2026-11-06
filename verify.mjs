@@ -46,7 +46,14 @@ function liveConfig(values) {
   return config;
 }
 
-/** The exact reviewer request the official plugin builds (lib/index.js:400-413). */
+/**
+ * The exact reviewer request the official plugin builds.
+ *
+ * `purpose` mirrors the shipped protocol: DSH 0.2.2 declares `"auto-review"`
+ * in `LlmRequestPurposeMap` and sends it with the review call; 0.2.1 and
+ * earlier sent the same request with no tag at all. `legacyReviewRequest`
+ * below covers that older shape.
+ */
 function reviewRequest(overrides = {}) {
   return Object.freeze({
     provider: "session-provider",
@@ -59,9 +66,16 @@ function reviewRequest(overrides = {}) {
       },
     ],
     temperature: 0,
+    purpose: "auto-review",
     signal: new AbortController().signal,
     ...overrides,
   });
+}
+
+/** The same reviewer request as DSH 0.2.1 and earlier built it: no purpose tag. */
+function legacyReviewRequest(overrides = {}) {
+  const { purpose: _purpose, ...rest } = reviewRequest(overrides);
+  return Object.freeze(rest);
 }
 
 function* validReviewResponse(label) {
@@ -146,6 +160,7 @@ console.log("\n2. Non-review calls are never touched, even with a route configur
     "ordinary chat (no fixed policy)": reviewRequest({ system: "You are a helpful assistant." }),
     "compaction (purpose set)": reviewRequest({ purpose: "compaction" }),
     "session title (purpose set)": reviewRequest({ purpose: "session-title" }),
+    "unfamiliar auxiliary purpose": reviewRequest({ purpose: "some-future-auxiliary-call" }),
     "review-shaped but with tools": reviewRequest({ tools: [{ name: "read", description: "", parameters: {} }] }),
     "review-shaped but temperature 0.2": reviewRequest({ temperature: 0.2 }),
     "no system prompt at all": reviewRequest({ system: undefined }),
@@ -176,7 +191,7 @@ console.log("\n3. A review call is rerouted with everything else preserved");
   check("temperature preserved", forwarded?.temperature === 0);
   check("signal preserved", forwarded?.signal === original.signal);
   check("no tools invented", forwarded?.tools === undefined);
-  check("no purpose invented", forwarded?.purpose === undefined);
+  check("review purpose is preserved, not invented", forwarded?.purpose === "auto-review", String(forwarded?.purpose));
   check(
     "unsupported effort dropped (off is not declared)",
     forwarded?.reasoningEffort === undefined,
@@ -1027,6 +1042,32 @@ console.log("\\n35. Official block framing and usage chunks remain valid");
   const chunks = await through(listeners.get("llm/stream"), reviewRequest());
   check("closed reasoning/text blocks and usage use one primary dispatch", dispatched.length === 1, String(dispatched.length));
   check("usage and protocol-valid framed blocks reach the official consumer", chunks.some((chunk) => chunk.type === "usage") && chunks.at(-1)?.reason?.kind === "stop", JSON.stringify(chunks));
+}
+
+console.log("\\n36. Both shipped reviewer protocols are recognised");
+{
+  // 0.2.2-rc.1 sends `purpose: "auto-review"`; 0.2.1 and earlier sent the
+  // same request with no tag. Both must be rerouted, otherwise the plugin
+  // silently goes inert on the newer runtime.
+  for (const [label, build] of [["tagged (0.2.2+)", reviewRequest], ["untagged (0.2.1 and earlier)", legacyReviewRequest]]) {
+    const { ctx, listeners, dispatched } = fakeContext({ providers: ["session-provider", "target"] });
+    apply(ctx, liveConfig({ provider: "target", model: "target-model" }));
+    const original = build();
+    await through(listeners.get("llm/stream"), original);
+    check(`${label}: rerouted once`, dispatched.length === 1, `dispatched ${dispatched.length}`);
+    check(`${label}: provider rewritten`, dispatched[0]?.provider === "target", String(dispatched[0]?.provider));
+    check(`${label}: purpose forwarded unchanged`, dispatched[0]?.purpose === original.purpose, String(dispatched[0]?.purpose));
+  }
+}
+
+console.log("\\n37. Another producer's purpose tag is never rerouted");
+{
+  for (const purpose of ["compaction", "session-title", "some-future-auxiliary-call"]) {
+    const { ctx, listeners, dispatched } = fakeContext({ providers: ["session-provider", "target"] });
+    apply(ctx, liveConfig({ provider: "target", model: "target-model" }));
+    await through(listeners.get("llm/stream"), reviewRequest({ purpose }));
+    check(`purpose "${purpose}" left alone`, dispatched.length === 0, `dispatched ${dispatched.length}`);
+  }
 }
 
 console.log(failures === 0 ? "\\nAll checks passed.\\n" : `\\n${failures} check(s) failed.\\n`);

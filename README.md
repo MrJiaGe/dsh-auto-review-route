@@ -66,7 +66,7 @@ return readDecision(ctx.llm.stream(options))
 | `system` 以 `REVIEW_POLICY` 开头 | 官方固定的审查提示词首行（`lib/index.js:20`） |
 | `temperature === 0` | 官方审查固定 0 |
 | `tools === undefined` | 审查请求不带工具 |
-| `purpose === undefined` | compaction 带 `'compaction'`、标题生成带 `'session-title'`，天然排除 |
+| `purpose` 为 `undefined` 或 `"auto-review"` | 0.2.1 及更早的审查调用不带 `purpose`；0.2.2 起官方在 `LlmRequestPurposeMap` 中声明并发送 `"auto-review"`。其他生产者的标记（`compaction`、`session-title` 等）一定会被排除 |
 
 ## 明确不做的事
 
@@ -138,7 +138,7 @@ node render-check.mjs
 
 1. 未配置时审查调用不被改道（官方行为）
 2. 非审查调用（普通对话 / compaction / 会话标题 / 带工具 / 温度非 0 / 无 system）一律不碰
-3. 审查调用被改道，且 `system` / `messages` / `temperature` / `signal` 原样保留，不凭空加 `tools` 或 `purpose`
+3. 审查调用被改道，且 `system` / `messages` / `temperature` / `signal` / `purpose` 原样保留，不凭空加 `tools`
 4. 声明过的档位会转发
 5. 渠道不存在 → 不改道 + 一条日志
 6. 目标路由与会话路由相同时不重复派发
@@ -156,11 +156,12 @@ node render-check.mjs
 18. 设置 bridge 拒绝不完整的渠道/模型对，且仅允许写入插件拥有的字段
 19. Client 中英文配置页显示对称四选框、开关默认关闭、模型目录加载和成对校验，并验证窄屏网格
 20. 严格校验 allow/deny JSON、重复成员、block 顺序和 stop finish；无效主结果逐路线重试/回退，回退错误及会话路线无效结果不递归，最终仍失败关闭
+21. 带 `purpose: "auto-review"`（0.2.2+）和不带 `purpose`（0.2.1 及更早）两种审查请求都能识别并改道；其他生产者的 `purpose` 标记一律不改道
 
 
 ## 已知边界
 
-- **识别依赖提示词前缀。** 官方若改掉 `REVIEW_POLICY` 首行，插件会静默失效（回落到官方行为，不会崩）。`marker` 可覆盖，但失效时**不会报错**——这是刻意的，宁可不生效也不能挡住审查。
+- **识别同时兼容带标记与不带标记两种审查请求。** DSH 0.2.1 及更早的官方审查调用不带 `purpose`；0.2.2 起官方向 `LlmRequestPurposeMap` 声明 `"auto-review"` 并随请求发送。两种形态都由 `REVIEW_POLICY` + `temperature 0` + 无工具识别，`purpose` 只作为排除其他生产者的判据。官方若再改标记名，本插件会静默失效（回落到官方行为，不会崩）。`marker` 可覆盖提示词前缀，但失效时**不会报错**——这是刻意的，宁可不生效也不能挡住审查。
 - **解析器需跟随官方协议。** 本插件在释放路线结果前镜像官方决策 JSON 与 block 结构校验；官方更改这些契约时需同步更新，最终无效结果仍由官方解析器失败关闭。
 - **理由语言只是提示，不是强制保证。** 目标模型或上游 API 可能忽略、覆盖该语言指令；无效 JSON 或 block 结构会按启用的重试/回退预算恢复，最终路线仍无效时官方 Auto-review 会按失败关闭。
 - **改道或追加理由语言指令会让 `llm/stream` 再进一次。** 其他监听者（如 dsh-ops 的 read-dedup）会看到两次。该监听者对无 `sessionId` 的调用本来就是清空后直通，行为等价。

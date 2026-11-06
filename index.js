@@ -55,6 +55,19 @@ export const inject = ["llm", "settings", "configEditor"];
  * identifies exactly one kind of request in this process.
  */
 const DEFAULT_MARKER = "REVIEW_POLICY";
+
+/**
+ * Auxiliary-call tag the reviewer request may carry.
+ *
+ * DSH 0.2.1 and earlier sent the review call without any `purpose`. From
+ * 0.2.2 the official plugin declares and sends `purpose: "auto-review"`, and
+ * `@deepseek-ai/dsh-llm` documents that auxiliary producers must tag their
+ * requests this way. Both shapes are still recognisable by the fixed policy,
+ * so the tag is treated as one more confirming (not exclusive) signal: an
+ * absent tag keeps the older protocol working, and any other tag — such as
+ * `compaction` or `session-title` — still proves this is not the reviewer.
+ */
+const REVIEW_PURPOSE = "auto-review";
 const DEFAULT_RETRY_ATTEMPTS = 2;
 const MAX_RETRY_ATTEMPTS = 5;
 const RETRY_INITIAL_DELAY_MS = 300;
@@ -500,10 +513,17 @@ function sameRoute(left, right) {
 /**
  * Whether one streaming call is the official auto-review request.
  *
- * All four conditions are properties of the shipped reviewer call and of no
- * other LLM call in this runtime: the fixed `REVIEW_POLICY` system prompt, a
- * zero temperature, no tool schemas, and no `purpose` tag (compaction and
- * session-title calls always carry one).
+ * The distinguishing conditions are properties of the shipped reviewer call
+ * and of no other LLM call in this runtime: the fixed `REVIEW_POLICY` system
+ * prompt, a zero temperature, and no tool schemas.
+ *
+ * `purpose` is matched as a set, not as "must be absent": DSH 0.2.1 and
+ * earlier sent the review call untagged, and 0.2.2 declares and sends
+ * `"auto-review"`. Any other tag — `compaction`, `session-title`, or whatever
+ * a future auxiliary producer adds — proves the call belongs to that producer,
+ * so it is rejected. Keeping the set explicit means an unexpected tag makes
+ * this plugin inert (the documented failure mode, never a blocked review)
+ * instead of quietly rerouting somebody else's request.
  *
  * @param options - the waterfall's request options.
  * @param marker - expected reviewer system-prompt prefix.
@@ -514,7 +534,7 @@ function isReviewCall(options, marker) {
   if (typeof options.system !== "string" || !options.system.startsWith(marker)) return false;
   if (options.temperature !== 0) return false;
   if (options.tools !== undefined) return false;
-  if (options.purpose !== undefined) return false;
+  if (options.purpose !== undefined && options.purpose !== REVIEW_PURPOSE) return false;
   return true;
 }
 

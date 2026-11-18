@@ -3,6 +3,10 @@
 node_modules/
 .pnpm-store/
 
+# Local cross-session memory store (meow-memory): SQLite database, WAL
+# sidecars, session logs and debug output. Machine-local state, never shipped.
+.dsh-meow/
+
 # Logs and editor/OS scratch files.
 *.log
 .DS_Store

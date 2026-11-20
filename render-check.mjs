@@ -395,29 +395,20 @@ console.log("\n8. The primary control does not rely on an undeclared theme token
   const referenced = [...css.matchAll(/var\((--dsw-alias-[a-z0-9-]+)/g)].map((match) => match[1]);
   const undeclared = [...new Set(referenced)].filter((token) => !declared.has(token));
   check("every referenced colour token is declared by the theme", undeclared.length === 0, undeclared.join(", "));
-  // A filled primary control must not take its text colour from a body token.
-  const primaryBlock = css.slice(css.indexOf(".aar button.aar-primary {"));
-  const primaryColor = primaryBlock.slice(0, primaryBlock.indexOf("}"));
+  const enabled = css.match(/\.aar button\.aar-primary,\s*\.aar button\.aar-primary:hover:not\(:disabled\)\s*\{([^}]*)\}/)?.[1] ?? "";
   check(
-    "the filled primary control sets a literal foreground",
-    /color:\s*#fff/.test(primaryColor),
-    primaryColor.replace(/\s+/g, " ").slice(0, 120),
+    "the primary control and its hover share a theme-aware foreground and fill",
+    /\bbackground:\s*var\(--dsw-alias-brand-primary\);/.test(enabled)
+      && /(?:^|[;\n])\s*color:\s*var\(--dsw-alias-bg-base\);/.test(enabled),
+    enabled.trim(),
   );
+  const disabled = css.match(/\.aar button\.aar-primary:disabled\s*\{([^}]*)\}/)?.[1] ?? "";
   check(
-    "it does not use the body label token as its foreground",
-    !/color:\s*var\(--dsw-alias-label-primary\)/.test(primaryColor),
-    primaryColor.replace(/\s+/g, " ").slice(0, 120),
-  );
-  const hoverBlock = css.slice(css.indexOf(".aar button.aar-primary:hover:not(:disabled)"));
-  check(
-    "the enabled primary hover keeps the brand fill",
-    /background:\s*var\(--dsw-alias-brand-primary/.test(hoverBlock.slice(0, hoverBlock.indexOf("}"))),
-    hoverBlock.replace(/\s+/g, " ").slice(0, 160),
-  );
-  check(
-    "the enabled primary hover keeps the white label",
-    /color:\s*#fff/.test(hoverBlock.slice(0, hoverBlock.indexOf("}"))),
-    hoverBlock.replace(/\s+/g, " ").slice(0, 160),
+    "the disabled primary control stays legible without fading its text",
+    /\bbackground:\s*var\(--dsw-alias-bg-layer-2\);/.test(disabled)
+      && /(?:^|[;\n])\s*color:\s*var\(--dsw-alias-label-secondary\);/.test(disabled)
+      && /\bopacity:\s*1;/.test(disabled),
+    disabled.trim(),
   );
 }
 

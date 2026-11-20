@@ -182,21 +182,21 @@ window.__ModuleLoader__.load({
 .aar button:hover:not(:disabled) { background:var(--dsw-alias-bg-layer-2,#8882); }
 .aar .aar-fallback-toggle { grid-column:1/-1; display:grid; gap:7px; padding:12px 0; border-block:1px solid var(--dsw-alias-border-l1,#8883); }
 .aar .aar-model-action { justify-self:start; min-height:28px; padding:3px 0; border:0; border-radius:0; color:var(--dsw-alias-brand-primary,#356be8); text-align:left; }
-/* Only the declared theme tokens are used here. The theme exposes no
-   "on-primary" foreground token, and the plain label token is body text that is
-   dark in the light theme, so a filled control carries a literal white label —
-   the same choice the shipping primary control makes — while its fill stays a
-   token so it still follows the theme. */
-.aar button.aar-primary {
-  background:var(--dsw-alias-brand-primary,#356be8);
-  color:#fff;
+/* The brand fill reverses between light and dark themes; use the base
+   surface colour for its contrasting label in both palettes. */
+.aar button.aar-primary,
+.aar button.aar-primary:hover:not(:disabled) {
+  background:var(--dsw-alias-brand-primary);
+  color:var(--dsw-alias-bg-base);
   border-color:transparent;
 }
-.aar button.aar-primary:hover:not(:disabled) { background:var(--dsw-alias-brand-primary,#356be8); color:#fff; }
 .aar :disabled { opacity:.6; cursor:not-allowed; }
-/* Keep the label legible even at the reduced disabled opacity: a disabled
-   filled control still shows its text instead of a blank surface. */
-.aar button.aar-primary:disabled { color:#fff; opacity:.55; }
+.aar button.aar-primary:disabled {
+  background:var(--dsw-alias-bg-layer-2);
+  color:var(--dsw-alias-label-secondary);
+  border-color:var(--dsw-alias-border-l2);
+  opacity:1;
+}
 .aar :is(button,select,input):focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#356be8); outline-offset:2px; }
 .aar .aar-card {
   border:1px solid var(--dsw-alias-border-l1,#8883); border-radius:var(--dsw-radius-sm,8px);
